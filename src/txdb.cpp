@@ -46,10 +46,61 @@ struct CoinEntry {
 
 } // namespace
 
+//! Approximate heap cost per negative-cache entry (LRU list node + index map node
+//! + duplicated key), used to turn the byte budget into an entry cap.
+static constexpr size_t APPROX_BYTES_PER_NEG_ENTRY{128};
+
+bool NegativeCoinCache::Contains(const COutPoint& outpoint)
+{
+    LOCK(m_mutex);
+    ++m_lookups;
+    const auto it{m_index.find(outpoint)};
+    const bool found{it != m_index.end()};
+    if (found) {
+        ++m_hits;
+        m_lru.splice(m_lru.begin(), m_lru, it->second); // promote to most-recently-used
+    }
+    if (m_lookups % 100000 == 0) {
+        LogDebug(BCLog::COINDB, "negative-coin cache: lookups=%llu hits=%llu size=%llu\n",
+                 (unsigned long long)m_lookups, (unsigned long long)m_hits, (unsigned long long)m_index.size());
+    }
+    return found;
+}
+
+void NegativeCoinCache::Insert(const COutPoint& outpoint)
+{
+    LOCK(m_mutex);
+    if (const auto it{m_index.find(outpoint)}; it != m_index.end()) {
+        m_lru.splice(m_lru.begin(), m_lru, it->second);
+        return;
+    }
+    if (m_index.size() >= m_max_entries) {
+        m_index.erase(m_lru.back()); // evict least-recently-used
+        m_lru.pop_back();
+    }
+    m_lru.push_front(outpoint);
+    m_index.emplace(outpoint, m_lru.begin());
+}
+
+void NegativeCoinCache::Clear()
+{
+    LOCK(m_mutex);
+    m_lru.clear();
+    m_index.clear();
+}
+
 CCoinsViewDB::CCoinsViewDB(DBParams db_params, CoinsViewOptions options) :
     m_db_params{std::move(db_params)},
     m_options{std::move(options)},
-    m_db{std::make_unique<CDBWrapper>(m_db_params)} { }
+    m_db{std::make_unique<CDBWrapper>(m_db_params)},
+    m_neg_cache{m_options.negative_cache_bytes > 0 ? static_cast<size_t>(m_options.negative_cache_bytes) / APPROX_BYTES_PER_NEG_ENTRY : 0}
+{
+    if (m_neg_cache.enabled()) {
+        LogPrintf("CCoinsViewDB: negative-coin cache enabled (%d MiB, ~%u entries)\n",
+                  m_options.negative_cache_bytes >> 20,
+                  (unsigned)(static_cast<size_t>(m_options.negative_cache_bytes) / APPROX_BYTES_PER_NEG_ENTRY));
+    }
+}
 
 void CCoinsViewDB::ResizeCache(size_t new_cache_size)
 {
@@ -67,12 +118,17 @@ void CCoinsViewDB::ResizeCache(size_t new_cache_size)
 
 std::optional<Coin> CCoinsViewDB::GetCoin(const COutPoint& outpoint) const
 {
+    if (m_neg_cache.enabled() && m_neg_cache.Contains(outpoint)) return std::nullopt;
     if (Coin coin; m_db->Read(CoinEntry(&outpoint), coin)) return coin;
+    if (m_neg_cache.enabled()) m_neg_cache.Insert(outpoint);
     return std::nullopt;
 }
 
 bool CCoinsViewDB::HaveCoin(const COutPoint &outpoint) const {
-    return m_db->Exists(CoinEntry(&outpoint));
+    if (m_neg_cache.enabled() && m_neg_cache.Contains(outpoint)) return false;
+    if (m_db->Exists(CoinEntry(&outpoint))) return true;
+    if (m_neg_cache.enabled()) m_neg_cache.Insert(outpoint);
+    return false;
 }
 
 uint256 CCoinsViewDB::GetBestBlock() const {
@@ -147,6 +203,9 @@ bool CCoinsViewDB::BatchWrite(CoinsViewCacheCursor& cursor, const uint256 &hashB
 
     LogDebug(BCLog::COINDB, "Writing final batch of %.2f MiB\n", batch.SizeEstimate() * (1.0 / 1048576.0));
     bool ret = m_db->WriteBatch(batch);
+    // The on-disk UTXO set just changed; any cached "absent" verdict may now be
+    // stale (a coin could have been written), so drop the negative cache.
+    if (m_neg_cache.enabled()) m_neg_cache.Clear();
     LogDebug(BCLog::COINDB, "Committed %u changed transaction outputs (out of %u) to coin database...\n", (unsigned int)changed, (unsigned int)count);
     return ret;
 }
