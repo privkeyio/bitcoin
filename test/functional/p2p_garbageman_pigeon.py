@@ -32,6 +32,7 @@ from test_framework.messages import (
     msg_getdata,
     msg_tx,
 )
+from test_framework.blocktools import COINBASE_MATURITY
 from test_framework.p2p import P2PInterface, p2p_lock
 from test_framework.script import CScript, OP_RETURN
 from test_framework.test_framework import BitcoinTestFramework
@@ -42,6 +43,7 @@ from test_framework.wallet import MiniWallet
 class GarbagemanPigeonTest(BitcoinTestFramework):
     def set_test_params(self):
         self.num_nodes = 1
+        self.setup_clean_chain = True
         self.extra_args = [[]]  # default policy: oversize OP_RETURN is filtered
 
     def pigeon_probe(self, tx):
@@ -66,6 +68,7 @@ class GarbagemanPigeonTest(BitcoinTestFramework):
     def run_test(self):
         node = self.nodes[0]
         self.wallet = MiniWallet(node)
+        self.generate(self.wallet, COINBASE_MATURITY + 1)
 
         self.log.info("Filtered tx (oversize OP_RETURN): probe must get notfound, not the tx")
         filtered = self.wallet.create_self_transfer_multi(num_outputs=1, fee_per_output=50000)["tx"]
