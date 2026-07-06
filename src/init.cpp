@@ -887,6 +887,16 @@ void InitParameterInteraction(ArgsManager& args)
         args.SoftSetArg("-blockmaxweight", "4000000");
     }
 
+    // Match Libre Relay's fee floor. A node broadcasts its minrelaytxfee in the
+    // feefilter message, so the Knots default (1000) makes a node that
+    // preferentially peers as libre-relay trivially distinguishable from a
+    // genuine Libre Relay peer (which advertises 100). Lower both the fee floor
+    // and the incremental fee (the latter also selects the feefilter rounder
+    // tier) so the feefilter is identical. This only lowers the fee floor; the
+    // datacarrier filtering is unaffected. SoftSet so an operator can override.
+    args.SoftSetArg("-incrementalrelayfee", FormatMoney(CORE_INCREMENTAL_RELAY_FEE));
+    args.SoftSetArg("-minrelaytxfee", FormatMoney(CORE_INCREMENTAL_RELAY_FEE));
+
     // when specifying an explicit binding address, you want to listen on it
     // even when -connect or -proxy is specified
     if (!args.GetArgs("-bind").empty()) {
