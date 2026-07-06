@@ -808,9 +808,13 @@ public:
         case ConnectionType::FEELER:
         case ConnectionType::BLOCK_RELAY:
         case ConnectionType::ADDR_FETCH:
+        // A libre-relay peer is attacker-selectable (any node may advertise the
+        // bit) and is not a general full-relay peer, so it must not count toward
+        // per-network full-outbound accounting or it could strip a genuine
+        // peer's eviction protection.
+        case ConnectionType::LIBRE_RELAY:
                 return false;
         case ConnectionType::OUTBOUND_FULL_RELAY:
-        case ConnectionType::LIBRE_RELAY:
         case ConnectionType::MANUAL:
                 return true;
         } // no default case, so the compiler can warn about missing cases
@@ -843,11 +847,16 @@ public:
             case ConnectionType::INBOUND:
             case ConnectionType::MANUAL:
             case ConnectionType::FEELER:
+            // A libre-relay peer is selected for its libre-relay service bit, not
+            // for general desirable services, and (being Core-based) does not
+            // advertise NODE_REDUCED_DATA. Expecting services from it would both
+            // risk disconnecting it and count it against the reduced-data
+            // outbound cap, churning the very peers we mean to keep.
+            case ConnectionType::LIBRE_RELAY:
                 return false;
             case ConnectionType::OUTBOUND_FULL_RELAY:
             case ConnectionType::BLOCK_RELAY:
             case ConnectionType::ADDR_FETCH:
-            case ConnectionType::LIBRE_RELAY:
                 return true;
         } // no default case, so the compiler can warn about missing cases
 
