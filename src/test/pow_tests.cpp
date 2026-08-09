@@ -29,7 +29,7 @@ BOOST_AUTO_TEST_CASE(get_next_work)
     // copy that code, we just hardcode the expected result.
     unsigned int expected_nbits = 0x1d00d86aU;
     BOOST_CHECK_EQUAL(CalculateNextWorkRequired(&pindexLast, nLastRetargetTime, chainParams->GetConsensus()), expected_nbits);
-    BOOST_CHECK(PermittedDifficultyTransition(chainParams->GetConsensus(), pindexLast.nHeight+1, pindexLast.nBits, expected_nbits));
+    BOOST_CHECK(PermittedDifficultyTransition(chainParams->GetConsensus(), pindexLast.nHeight+1, pindexLast.nBits, expected_nbits, pindexLast.nTime, pindexLast.nTime));
 }
 
 /* Test the constraint on the upper bound for next work */
@@ -43,7 +43,7 @@ BOOST_AUTO_TEST_CASE(get_next_work_pow_limit)
     pindexLast.nBits = 0x1d00ffff;
     unsigned int expected_nbits = 0x1d00ffffU;
     BOOST_CHECK_EQUAL(CalculateNextWorkRequired(&pindexLast, nLastRetargetTime, chainParams->GetConsensus()), expected_nbits);
-    BOOST_CHECK(PermittedDifficultyTransition(chainParams->GetConsensus(), pindexLast.nHeight+1, pindexLast.nBits, expected_nbits));
+    BOOST_CHECK(PermittedDifficultyTransition(chainParams->GetConsensus(), pindexLast.nHeight+1, pindexLast.nBits, expected_nbits, pindexLast.nTime, pindexLast.nTime));
 }
 
 /* Test the constraint on the lower bound for actual time taken */
@@ -57,10 +57,10 @@ BOOST_AUTO_TEST_CASE(get_next_work_lower_limit_actual)
     pindexLast.nBits = 0x1c05a3f4;
     unsigned int expected_nbits = 0x1c0168fdU;
     BOOST_CHECK_EQUAL(CalculateNextWorkRequired(&pindexLast, nLastRetargetTime, chainParams->GetConsensus()), expected_nbits);
-    BOOST_CHECK(PermittedDifficultyTransition(chainParams->GetConsensus(), pindexLast.nHeight+1, pindexLast.nBits, expected_nbits));
+    BOOST_CHECK(PermittedDifficultyTransition(chainParams->GetConsensus(), pindexLast.nHeight+1, pindexLast.nBits, expected_nbits, pindexLast.nTime, pindexLast.nTime));
     // Test that reducing nbits further would not be a PermittedDifficultyTransition.
     unsigned int invalid_nbits = expected_nbits-1;
-    BOOST_CHECK(!PermittedDifficultyTransition(chainParams->GetConsensus(), pindexLast.nHeight+1, pindexLast.nBits, invalid_nbits));
+    BOOST_CHECK(!PermittedDifficultyTransition(chainParams->GetConsensus(), pindexLast.nHeight+1, pindexLast.nBits, invalid_nbits, pindexLast.nTime, pindexLast.nTime));
 }
 
 /* Test the constraint on the upper bound for actual time taken */
@@ -74,10 +74,10 @@ BOOST_AUTO_TEST_CASE(get_next_work_upper_limit_actual)
     pindexLast.nBits = 0x1c387f6f;
     unsigned int expected_nbits = 0x1d00e1fdU;
     BOOST_CHECK_EQUAL(CalculateNextWorkRequired(&pindexLast, nLastRetargetTime, chainParams->GetConsensus()), expected_nbits);
-    BOOST_CHECK(PermittedDifficultyTransition(chainParams->GetConsensus(), pindexLast.nHeight+1, pindexLast.nBits, expected_nbits));
+    BOOST_CHECK(PermittedDifficultyTransition(chainParams->GetConsensus(), pindexLast.nHeight+1, pindexLast.nBits, expected_nbits, pindexLast.nTime, pindexLast.nTime));
     // Test that increasing nbits further would not be a PermittedDifficultyTransition.
     unsigned int invalid_nbits = expected_nbits+1;
-    BOOST_CHECK(!PermittedDifficultyTransition(chainParams->GetConsensus(), pindexLast.nHeight+1, pindexLast.nBits, invalid_nbits));
+    BOOST_CHECK(!PermittedDifficultyTransition(chainParams->GetConsensus(), pindexLast.nHeight+1, pindexLast.nBits, invalid_nbits, pindexLast.nTime, pindexLast.nTime));
 }
 
 BOOST_AUTO_TEST_CASE(CheckProofOfWork_test_negative_target)
@@ -206,6 +206,72 @@ BOOST_AUTO_TEST_CASE(ChainParams_TESTNET4_sanity)
 BOOST_AUTO_TEST_CASE(ChainParams_SIGNET_sanity)
 {
     sanity_check_chainparams(*m_node.args, ChainType::SIGNET);
+}
+
+/* The one-off PoW-change target shift must be accepted by the headers-sync
+ * anti-DoS gate, without loosening it in any other case. */
+BOOST_AUTO_TEST_CASE(powchange_permitted_difficulty_transition)
+{
+    const auto chainParams = CreateChainParams(*m_node.args, ChainType::MAIN);
+    Consensus::Params params = chainParams->GetConsensus();
+
+    // The gate is only live on networks without min-difficulty blocks.
+    BOOST_CHECK(!params.fPowAllowMinDifficultyBlocks);
+
+    const uint32_t tip_nbits = 0x1702905c;
+    CBlockIndex pindexLast;
+    pindexLast.nHeight = 800000;
+    pindexLast.nBits = tip_nbits;
+    // 800001 is not a retarget boundary, which is where a time-based fork lands.
+    BOOST_CHECK((pindexLast.nHeight + 1) % params.DifficultyAdjustmentInterval() != 0);
+
+    const int64_t hf_time = 1800000000;
+    const int64_t pre_time = hf_time - 600;
+    CBlockHeader block;
+    pindexLast.nTime = pre_time;
+    block.nTime = hf_time;
+
+    // With the fork unset, behaviour is unchanged in both directions.
+    const unsigned int inert_nbits = GetNextWorkRequired(&pindexLast, &block, params);
+    BOOST_CHECK_EQUAL(inert_nbits, tip_nbits);
+    BOOST_CHECK(PermittedDifficultyTransition(params, pindexLast.nHeight + 1, tip_nbits, inert_nbits, pre_time, hf_time));
+
+    // A null candidate block must not be dereferenced (the pow fuzz harness
+    // passes one) and cannot trigger a shift.
+    BOOST_CHECK_EQUAL(GetNextWorkRequired(&pindexLast, nullptr, params), tip_nbits);
+
+    // Schedule the fork; the next block is the first one past HardforkTime.
+    params.HardforkTime = hf_time;
+    params.PowChangeAlgo = HashAlgorithm::SHA256;
+    BOOST_CHECK(params.PowAlgorithmForTime(block.nTime) != params.PowAlgorithmForTime(pindexLast.nTime));
+    BOOST_CHECK_EQUAL(GetNextWorkRequired(&pindexLast, nullptr, params), tip_nbits);
+
+    const unsigned int fork_nbits = GetNextWorkRequired(&pindexLast, &block, params);
+    BOOST_CHECK_NE(fork_nbits, tip_nbits);
+
+    // This is the call headerssync.cpp makes for every header in IBD. The
+    // shifted target is now accepted across the algorithm change.
+    BOOST_CHECK(PermittedDifficultyTransition(params, pindexLast.nHeight + 1, tip_nbits, fork_nbits, pre_time, hf_time));
+
+    // ...but only that exact value: an extra 2^4 of slack is still rejected.
+    arith_uint256 too_easy;
+    too_easy.SetCompact(fork_nbits);
+    too_easy <<= 4;
+    BOOST_CHECK(!PermittedDifficultyTransition(params, pindexLast.nHeight + 1, tip_nbits, too_easy.GetCompact(), pre_time, hf_time));
+
+    // ...and only when the algorithm actually changes. Claiming the shift
+    // between two pre-fork blocks is still rejected.
+    BOOST_CHECK(!PermittedDifficultyTransition(params, pindexLast.nHeight + 1, tip_nbits, fork_nbits, pre_time, pre_time));
+
+    // At a retarget boundary the shift is permitted on top of the 4x window,
+    // and values beyond that window are still rejected.
+    const int64_t boundary_height = 798336;
+    BOOST_CHECK_EQUAL(boundary_height % params.DifficultyAdjustmentInterval(), 0);
+    BOOST_CHECK(PermittedDifficultyTransition(params, boundary_height, tip_nbits, fork_nbits, pre_time, hf_time));
+    arith_uint256 beyond_window;
+    beyond_window.SetCompact(fork_nbits);
+    beyond_window <<= 3;
+    BOOST_CHECK(!PermittedDifficultyTransition(params, boundary_height, tip_nbits, beyond_window.GetCompact(), pre_time, hf_time));
 }
 
 BOOST_AUTO_TEST_SUITE_END()

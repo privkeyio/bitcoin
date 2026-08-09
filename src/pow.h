@@ -42,9 +42,14 @@ bool CheckProofOfWorkImpl(uint256 hash, unsigned int nBits, const Consensus::Par
  * old value for blocks at the difficulty adjustment interval, and otherwise
  * requires the values to be the same.
  *
+ * old_time and new_time are the timestamps of the prior and the new block.
+ * They select the proof-of-work algorithm in force for each, so that the
+ * one-off target shift applied by GetNextWorkRequired at a PoW-algorithm
+ * change is recognised here as permitted rather than rejected.
+ *
  * Always returns true on networks where min difficulty blocks are allowed,
  * such as regtest/testnet.
  */
-bool PermittedDifficultyTransition(const Consensus::Params& params, int64_t height, uint32_t old_nbits, uint32_t new_nbits);
+bool PermittedDifficultyTransition(const Consensus::Params& params, int64_t height, uint32_t old_nbits, uint32_t new_nbits, int64_t old_time, int64_t new_time);
 
 #endif // BITCOIN_POW_H

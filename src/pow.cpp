@@ -11,6 +11,23 @@
 #include <uint256.h>
 #include <util/check.h>
 
+/** One-off target shift applied to the first block under a new PoW algorithm.
+ *
+ * Shared by GetNextWorkRequired and PermittedDifficultyTransition so the value
+ * that gets produced and the value that gets accepted cannot drift apart.
+ */
+static unsigned int ApplyPowChangeTargetShift(unsigned int nBits, const Consensus::Params& params)
+{
+    arith_uint256 bnNew;
+    bnNew.SetCompact(nBits);
+    bnNew <<= params.nPowChangeTargetShift;
+    const arith_uint256 bnPowLimit = UintToArith256(params.powLimit);
+    if (bnNew > bnPowLimit) {
+        bnNew = bnPowLimit;
+    }
+    return bnNew.GetCompact();
+}
+
 unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHeader *pblock, const Consensus::Params& params)
 {
     assert(pindexLast != nullptr);
@@ -53,14 +70,7 @@ unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHead
     // no timestamp to select an algorithm with, so no shift can apply.
     if (pblock && params.PowAlgorithmForTime(pblock->nTime) != params.PowAlgorithmForTime(pindexLast->nTime)) {
         // Adjust the target for the first block mined under a new PoW algorithm.
-        arith_uint256 bnNew;
-        bnNew.SetCompact(nBits);
-        bnNew <<= params.nPowChangeTargetShift;
-        const arith_uint256 bnPowLimit = UintToArith256(params.powLimit);
-        if (bnNew > bnPowLimit) {
-            bnNew = bnPowLimit;
-        }
-        nBits = bnNew.GetCompact();
+        nBits = ApplyPowChangeTargetShift(nBits, params);
     }
 
     return nBits;
@@ -105,9 +115,23 @@ unsigned int CalculateNextWorkRequired(const CBlockIndex* pindexLast, int64_t nF
 
 // Check that on difficulty adjustments, the new difficulty does not increase
 // or decrease beyond the permitted limits.
-bool PermittedDifficultyTransition(const Consensus::Params& params, int64_t height, uint32_t old_nbits, uint32_t new_nbits)
+bool PermittedDifficultyTransition(const Consensus::Params& params, int64_t height, uint32_t old_nbits, uint32_t new_nbits, int64_t old_time, int64_t new_time)
 {
     if (params.fPowAllowMinDifficultyBlocks) return true;
+
+    // Across a PoW-algorithm change, GetNextWorkRequired shifts the target once
+    // before returning it. Rebase the comparison onto the shifted target so the
+    // usual limits below apply to the change on top of it, rather than
+    // rejecting the shift itself.
+    if (params.PowAlgorithmForTime(new_time) != params.PowAlgorithmForTime(old_time)) {
+        // Reversing the PoW change is forbidden by consensus (pow-reversed).
+        // Refuse it here too: timestamps are not monotonic on this path, so a
+        // peer that may alternate them across the change would otherwise be
+        // granted the shift again on every header, walking a headers chain
+        // down to powLimit for free.
+        if (new_time < old_time) return false;
+        old_nbits = ApplyPowChangeTargetShift(old_nbits, params);
+    }
 
     if (height % params.DifficultyAdjustmentInterval() == 0) {
         int64_t smallest_timespan = params.nPowTargetTimespan/4;
