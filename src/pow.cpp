@@ -49,7 +49,9 @@ unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHead
         nBits = CalculateNextWorkRequired(pindexLast, pindexFirst->GetBlockTime(), params);
     }
 
-    if (params.PowAlgorithmForTime(pblock->nTime) != params.PowAlgorithmForTime(pindexLast->nTime)) {
+    // pblock is null when no candidate block is being evaluated; there is then
+    // no timestamp to select an algorithm with, so no shift can apply.
+    if (pblock && params.PowAlgorithmForTime(pblock->nTime) != params.PowAlgorithmForTime(pindexLast->nTime)) {
         // Adjust the target for the first block mined under a new PoW algorithm.
         arith_uint256 bnNew;
         bnNew.SetCompact(nBits);
