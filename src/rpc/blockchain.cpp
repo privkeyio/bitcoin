@@ -1899,6 +1899,7 @@ UniValue DeploymentInfo(const CBlockIndex* blockindex, const ChainstateManager& 
     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_TESTDUMMY);
     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_TAPROOT);
     SoftForkDescPushBack(blockindex, softforks, chainman, Consensus::DEPLOYMENT_REDUCED_DATA);
+
     return softforks;
 }
 } // anon namespace
@@ -1916,6 +1917,10 @@ RPCHelpMan getdeploymentinfo()
                 {RPCResult::Type::NUM, "height", "requested block height (or tip)"},
                 {RPCResult::Type::OBJ_DYN, "deployments", "", {
                     {RPCResult::Type::OBJ, "xxxx", "name of the deployment", RPCHelpForDeployment}
+                }},
+                {RPCResult::Type::OBJ, "hardfork", /*optional=*/true, "hardfork schedule, present only when one is configured", {
+                    {RPCResult::Type::NUM, "height", "the height the hardfork activates at"},
+                    {RPCResult::Type::BOOL, "active", "whether the hardfork rules apply to the block after this one"},
                 }},
             }
         },
@@ -1941,6 +1946,22 @@ RPCHelpMan getdeploymentinfo()
             deploymentinfo.pushKV("hash", blockindex->GetBlockHash().ToString());
             deploymentinfo.pushKV("height", blockindex->nHeight);
             deploymentinfo.pushKV("deployments", DeploymentInfo(blockindex, chainman));
+
+            // Reported at the top level rather than among the deployments so
+            // an operator can see whether the fork is scheduled and whether it
+            // has taken effect, instead of inferring that from rejected
+            // transactions. Every rule the fork carries activates together, at
+            // the deployment the proof-of-work change uses.
+            const Consensus::Params& consensus{chainman.GetConsensus()};
+            if (consensus.Blake2bHeight != std::numeric_limits<int>::max()) {
+                UniValue hf(UniValue::VOBJ);
+                hf.pushKV("height", consensus.Blake2bHeight);
+                // The block after this one is built on it, so it activates at
+                // one above this height. This is the same comparison
+                // DeploymentActiveAfter makes.
+                hf.pushKV("active", blockindex->nHeight + 1 >= consensus.Blake2bHeight);
+                deploymentinfo.pushKV("hardfork", std::move(hf));
+            }
             return deploymentinfo;
         },
     };
