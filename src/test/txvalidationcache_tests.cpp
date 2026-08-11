@@ -126,6 +126,7 @@ BOOST_FIXTURE_TEST_CASE(tx_mempool_block_doublespend, Dersig100Setup)
 // any script flag that is implemented as an upgraded NOP code.
 static void ValidateCheckInputsForAllFlags(const CTransaction &tx, uint32_t failing_flags, bool add_to_cache, CCoinsViewCache& active_coins_tip, ValidationCache& validation_cache) EXCLUSIVE_LOCKS_REQUIRED(::cs_main)
 {
+
     PrecomputedTransactionData txdata;
 
     FastRandomContext insecure_rand(true);
@@ -135,6 +136,11 @@ static void ValidateCheckInputsForAllFlags(const CTransaction &tx, uint32_t fail
 
         // Randomly selects flag combinations
         uint32_t test_flags = (uint32_t) insecure_rand.randrange((SCRIPT_VERIFY_END_MARKER - 1) << 1);
+
+        // The hardfork sighash only changes the outcome for inputs that
+        // actually verify a signature, which this helper's all-flags model
+        // cannot express. It has dedicated coverage in sighash_tests.
+        test_flags &= ~SCRIPT_VERIFY_UNIFIED_SIGHASH;
 
         // Filter out incompatible flag choices
         if ((test_flags & SCRIPT_VERIFY_CLEANSTACK)) {

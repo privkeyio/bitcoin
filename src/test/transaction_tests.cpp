@@ -122,6 +122,13 @@ bool CheckTxScripts(const CTransaction& tx, const std::map<COutPoint, CScript>& 
     const std::map<COutPoint, int64_t>& map_prevout_values, unsigned int flags,
     const PrecomputedTransactionData& txdata, const std::string& strTest, bool expect_valid)
 {
+    // Every transaction in this corpus is signed under the legacy rules, so the
+    // hardfork signature hash would invalidate all of them. It changes which
+    // signatures are valid rather than which scripts are, so it does not belong
+    // in a flag sweep over fixed vectors; it has dedicated coverage in
+    // sighash_tests and feature_unified_sighash.
+    flags &= ~(unsigned int)SCRIPT_VERIFY_UNIFIED_SIGHASH;
+
     bool tx_valid = true;
     ScriptError err = expect_valid ? SCRIPT_ERR_UNKNOWN_ERROR : SCRIPT_ERR_OK;
     for (unsigned int i = 0; i < tx.vin.size() && tx_valid; ++i) {
