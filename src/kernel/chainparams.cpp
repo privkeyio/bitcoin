@@ -656,6 +656,10 @@ public:
             case Consensus::BuriedDeployment::DEPLOYMENT_SEGWIT:
                 consensus.SegwitHeight = int{height};
                 break;
+            // HARDFORK-PLUMBING: the proof-of-work change sets this too.
+            case Consensus::BuriedDeployment::DEPLOYMENT_BLAKE2B:
+                consensus.Blake2bHeight = int{height};
+                break;
             case Consensus::BuriedDeployment::DEPLOYMENT_HEIGHTINCB:
                 consensus.BIP34Height = int{height};
                 break;
