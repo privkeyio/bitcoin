@@ -1587,8 +1587,9 @@ static RPCHelpMan finalizepsbt()
     bool extract = request.params[1].isNull() || (!request.params[1].isNull() && request.params[1].get_bool());
 
     CMutableTransaction mtx;
-    const SighashRules sighash_rules{WITH_LOCK(cs_main, return HardforkActiveForNextBlock(EnsureAnyChainman(request.context)))};
-    bool complete = FinalizeAndExtractPSBT(psbtx, mtx, sighash_rules);
+    // Finalizing only verifies signatures already present, and the opt-in flag
+    // permits a message rather than rejecting one, so no chain state is needed.
+    bool complete = FinalizeAndExtractPSBT(psbtx, mtx, SighashRules::UNIFIED);
 
     UniValue result(UniValue::VOBJ);
     DataStream ssTx{};
@@ -1926,7 +1927,8 @@ static RPCHelpMan analyzepsbt()
         throw JSONRPCError(RPC_DESERIALIZATION_ERROR, strprintf("TX decode failed %s", error));
     }
 
-    PSBTAnalysis psbta = AnalyzePSBT(psbtx);
+    const SighashRules sighash_rules{WITH_LOCK(cs_main, return HardforkActiveForNextBlock(EnsureAnyChainman(request.context)))};
+    PSBTAnalysis psbta = AnalyzePSBT(psbtx, sighash_rules);
 
     UniValue result(UniValue::VOBJ);
     UniValue inputs_result(UniValue::VARR);
