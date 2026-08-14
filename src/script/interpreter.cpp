@@ -1895,22 +1895,52 @@ uint256 ComputeTapbranchHash(Span<const unsigned char> a, Span<const unsigned ch
     return ss_branch.GetSHA256();
 }
 
+size_t TaprootPathChunkCount(Span<const unsigned char> control)
+{
+    if (control.size() < TAPROOT_CONTROL_EXT_BASE_SIZE) return 0;
+    if ((control.size() - TAPROOT_CONTROL_EXT_BASE_SIZE) % TAPROOT_CONTROL_NODE_SIZE != 0) return 0;
+    return control[TAPROOT_CONTROL_BASE_SIZE];
+}
+
+bool UsesChunkedTappath(const CTransaction& tx)
+{
+    for (const CTxIn& txin : tx.vin) {
+        Span stack{txin.scriptWitness.stack};
+        if (stack.size() >= 2 && !stack.back().empty() && stack.back()[0] == ANNEX_TAG) {
+            SpanPopBack(stack);
+        }
+        if (stack.size() >= 2 && stack.back().size() == TAPROOT_CONTROL_EXT_SIZE &&
+            TaprootPathChunkCount(stack.back()) != 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/** Fold the leaf hash with every path node, in order, across however many runs the path arrived in. */
+static uint256 FoldTaprootPath(Span<const Span<const unsigned char>> path_runs, const uint256& tapleaf_hash)
+{
+    uint256 k = tapleaf_hash;
+    for (const auto& run : path_runs) {
+        assert(run.size() % TAPROOT_CONTROL_NODE_SIZE == 0);
+        for (size_t offset = 0; offset < run.size(); offset += TAPROOT_CONTROL_NODE_SIZE) {
+            k = ComputeTapbranchHash(k, run.subspan(offset, TAPROOT_CONTROL_NODE_SIZE));
+        }
+    }
+    return k;
+}
+
 uint256 ComputeTaprootMerkleRoot(Span<const unsigned char> control, const uint256& tapleaf_hash)
 {
     assert(control.size() >= TAPROOT_CONTROL_BASE_SIZE);
     assert(control.size() <= TAPROOT_CONTROL_MAX_SIZE);
     assert((control.size() - TAPROOT_CONTROL_BASE_SIZE) % TAPROOT_CONTROL_NODE_SIZE == 0);
 
-    const int path_len = (control.size() - TAPROOT_CONTROL_BASE_SIZE) / TAPROOT_CONTROL_NODE_SIZE;
-    uint256 k = tapleaf_hash;
-    for (int i = 0; i < path_len; ++i) {
-        Span node{Span{control}.subspan(TAPROOT_CONTROL_BASE_SIZE + TAPROOT_CONTROL_NODE_SIZE * i, TAPROOT_CONTROL_NODE_SIZE)};
-        k = ComputeTapbranchHash(k, node);
-    }
-    return k;
+    const Span<const unsigned char> path{control.subspan(TAPROOT_CONTROL_BASE_SIZE)};
+    return FoldTaprootPath(Span{&path, 1}, tapleaf_hash);
 }
 
-static bool VerifyTaprootCommitment(const std::vector<unsigned char>& control, const std::vector<unsigned char>& program, const uint256& tapleaf_hash)
+static bool VerifyTaprootCommitment(const std::vector<unsigned char>& control, Span<const Span<const unsigned char>> path_runs, const std::vector<unsigned char>& program, const uint256& tapleaf_hash)
 {
     assert(control.size() >= TAPROOT_CONTROL_BASE_SIZE);
     assert(program.size() >= uint256::size());
@@ -1919,7 +1949,7 @@ static bool VerifyTaprootCommitment(const std::vector<unsigned char>& control, c
     //! The output pubkey (taken from the scriptPubKey).
     const XOnlyPubKey q{program};
     // Compute the Merkle root from the leaf and the provided path.
-    const uint256 merkle_root = ComputeTaprootMerkleRoot(control, tapleaf_hash);
+    const uint256 merkle_root = FoldTaprootPath(path_runs, tapleaf_hash);
     // Verify that the output pubkey matches the tweaked internal pubkey, after correcting for parity.
     return q.CheckTapTweak(p, merkle_root, control[0] & 1);
 }
@@ -1979,13 +2009,55 @@ static bool VerifyWitnessProgram(const CScriptWitness& witness, int witversion, 
         } else {
             // Script path spending (stack size is >1 after removing optional annex)
             const valtype& control = SpanPopBack(stack);
-            const valtype& script = SpanPopBack(stack);
-            const unsigned int max_control_size = (flags & SCRIPT_VERIFY_REDUCED_DATA) ? TAPROOT_CONTROL_MAX_SIZE_REDUCED : TAPROOT_CONTROL_MAX_SIZE;
-            if (control.size() < TAPROOT_CONTROL_BASE_SIZE || control.size() > max_control_size || ((control.size() - TAPROOT_CONTROL_BASE_SIZE) % TAPROOT_CONTROL_NODE_SIZE) != 0) {
-                return set_error(serror, SCRIPT_ERR_TAPROOT_WRONG_CONTROL_SIZE);
+            //! Only the chunked branch fills the vector; the flat one points at a single run on
+            //! the stack and allocates nothing, as it is walked for every script-path input in
+            //! every block during a sync.
+            std::vector<Span<const unsigned char>> path_runs;
+            Span<const unsigned char> flat_path;
+            Span<const Span<const unsigned char>> path;
+            // A control block whose size is 2 mod TAPROOT_CONTROL_NODE_SIZE cannot be a flat
+            // one, so it needs no marker of its own: it carries the first nodes of the path
+            // and a count of the chunks holding the rest, which sit between the script and it.
+            const size_t chunk_count{(flags & SCRIPT_VERIFY_CHUNKED_TAPPATH) ? TaprootPathChunkCount(control) : 0};
+            if (chunk_count > 0) {
+                // Canonical: the flat part is filled before any chunk is used, every chunk is
+                // full but the last, and there is at least one. So each path has one encoding.
+                constexpr size_t full_chunk_size{TAPROOT_PATH_CHUNK_NODE_COUNT * TAPROOT_CONTROL_NODE_SIZE};
+                if (control.size() != TAPROOT_CONTROL_EXT_SIZE || stack.size() < chunk_count + 1) {
+                    return set_error(serror, SCRIPT_ERR_TAPROOT_WRONG_CONTROL_SIZE);
+                }
+                path_runs.resize(chunk_count + 1);
+                path_runs[0] = Span{control}.subspan(TAPROOT_CONTROL_EXT_BASE_SIZE);
+                size_t node_count{TAPROOT_CONTROL_EXT_NODE_COUNT};
+                // Chunks are popped from the last in fold order to the first.
+                for (size_t i{chunk_count}; i >= 1; --i) {
+                    const valtype& chunk = SpanPopBack(stack);
+                    if (chunk.empty() || chunk.size() % TAPROOT_CONTROL_NODE_SIZE != 0 || chunk.size() > full_chunk_size ||
+                        (i != chunk_count && chunk.size() != full_chunk_size)) {
+                        return set_error(serror, SCRIPT_ERR_TAPROOT_WRONG_CONTROL_SIZE);
+                    }
+                    node_count += chunk.size() / TAPROOT_CONTROL_NODE_SIZE;
+                    path_runs[i] = Span{chunk};
+                }
+                if (node_count > TAPROOT_CONTROL_MAX_NODE_COUNT) {
+                    return set_error(serror, SCRIPT_ERR_TAPROOT_WRONG_CONTROL_SIZE);
+                }
+                path = Span{path_runs};
+            } else {
+                // Once the chunked encoding exists, the flat one keeps only the paths it can
+                // hold within the ceiling. Otherwise a deep path would have two valid
+                // serialisations wherever BIP-110 is not enforcing rule 5, which is a field of
+                // arbitrary bytes reopened and a witness a third party can rewrite.
+                const unsigned int max_control_size = (flags & (SCRIPT_VERIFY_REDUCED_DATA | SCRIPT_VERIFY_CHUNKED_TAPPATH)) ? TAPROOT_CONTROL_MAX_SIZE_REDUCED : TAPROOT_CONTROL_MAX_SIZE;
+                if (control.size() < TAPROOT_CONTROL_BASE_SIZE || control.size() > max_control_size || ((control.size() - TAPROOT_CONTROL_BASE_SIZE) % TAPROOT_CONTROL_NODE_SIZE) != 0) {
+                    return set_error(serror, SCRIPT_ERR_TAPROOT_WRONG_CONTROL_SIZE);
+                }
+                flat_path = Span{control}.subspan(TAPROOT_CONTROL_BASE_SIZE);
+                path = Span{&flat_path, 1};
             }
+            const valtype& script = SpanPopBack(stack);
             execdata.m_tapleaf_hash = ComputeTapleafHash(control[0] & TAPROOT_LEAF_MASK, script);
-            if (!VerifyTaprootCommitment(control, program, execdata.m_tapleaf_hash)) {
+            if (!VerifyTaprootCommitment(control, path, program, execdata.m_tapleaf_hash)) {
                 return set_error(serror, SCRIPT_ERR_WITNESS_PROGRAM_MISMATCH);
             }
             execdata.m_tapleaf_hash_init = true;

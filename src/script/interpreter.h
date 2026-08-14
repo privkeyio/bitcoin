@@ -41,6 +41,11 @@ enum
  *
  *  All flags are intended to be soft forks: the set of acceptable scripts under
  *  flags (A | B) is a subset of the acceptable scripts under flag (A).
+ *
+ *  SCRIPT_VERIFY_CHUNKED_TAPPATH is the exception, because it belongs to a
+ *  hardfork: it accepts a chunked Taproot merkle path that is invalid without
+ *  it. Anything that assumes the property above must exclude it, as
+ *  test/fuzz/script_flags.cpp does.
  */
 enum : uint32_t {
     SCRIPT_VERIFY_NONE      = 0,
@@ -150,6 +155,24 @@ enum : uint32_t {
     // OP_IF is also forbidden inside Tapscript
     SCRIPT_VERIFY_REDUCED_DATA = (1U << 21),
 
+    // Allow a Taproot merkle path to be carried in chunks of at most
+    // MAX_SCRIPT_ELEMENT_SIZE_REDUCED bytes, so that a deep path needs no field
+    // larger than any other witness item, and retire the flat encoding above
+    // that size.
+    //
+    // Bit 23, not the next one free here: the opt-in signature hash this fork
+    // also carries takes bit 22, and two enumerators sharing a value compile
+    // quietly into one flag that switches on both rules.
+    //
+    // Both directions at once, unlike every other flag here: it makes chunked
+    // spends valid that were not, and flat deep spends invalid that were. The
+    // relaxing half is why policy may read median time past and lag consensus;
+    // the restricting half is why the flat-form limit is a standardness rule
+    // from the moment this ships rather than one that switches on at
+    // activation. Removing either guard on the strength of the other reopens a
+    // halt in block production.
+    SCRIPT_VERIFY_CHUNKED_TAPPATH = (1U << 23),
+
     // Constants to point to the highest flag in use. Add new flags above this line.
     //
     SCRIPT_VERIFY_END_MARKER
@@ -250,6 +273,41 @@ static constexpr size_t TAPROOT_CONTROL_MAX_NODE_COUNT = 128;
 static constexpr size_t TAPROOT_CONTROL_MAX_SIZE = TAPROOT_CONTROL_BASE_SIZE + TAPROOT_CONTROL_NODE_SIZE * TAPROOT_CONTROL_MAX_NODE_COUNT;
 static constexpr size_t TAPROOT_CONTROL_MAX_NODE_COUNT_REDUCED = 7;
 static constexpr size_t TAPROOT_CONTROL_MAX_SIZE_REDUCED = TAPROOT_CONTROL_BASE_SIZE + TAPROOT_CONTROL_NODE_SIZE * TAPROOT_CONTROL_MAX_NODE_COUNT_REDUCED;
+//! Extended control block: the base, plus one byte counting the path chunks that follow the script.
+//! Its size is 2 mod TAPROOT_CONTROL_NODE_SIZE, which no valid flat control block can be, so the
+//! encoding identifies itself without spending a leaf version.
+static constexpr size_t TAPROOT_CONTROL_EXT_BASE_SIZE = TAPROOT_CONTROL_BASE_SIZE + 1;
+//! Nodes the extended control block carries itself. Stated independently of
+//! TAPROOT_CONTROL_MAX_NODE_COUNT_REDUCED, which is BIP-110's cap: the two happen to agree, but
+//! moving that cap must not move this consensus rule's self-identifying size.
+static constexpr size_t TAPROOT_CONTROL_EXT_NODE_COUNT = 7;
+static constexpr size_t TAPROOT_CONTROL_EXT_SIZE = TAPROOT_CONTROL_EXT_BASE_SIZE + TAPROOT_CONTROL_NODE_SIZE * TAPROOT_CONTROL_EXT_NODE_COUNT;
+//! Nodes per full path chunk. Chunks are capped at MAX_SCRIPT_ELEMENT_SIZE_REDUCED bytes.
+static constexpr size_t TAPROOT_PATH_CHUNK_NODE_COUNT = 8;
+
+//! The marker is the length: a flat control block is 1 mod TAPROOT_CONTROL_NODE_SIZE, an extended
+//! one is 2, so neither can ever be read as the other.
+static_assert(TAPROOT_CONTROL_BASE_SIZE % TAPROOT_CONTROL_NODE_SIZE == 1);
+static_assert(TAPROOT_CONTROL_EXT_SIZE % TAPROOT_CONTROL_NODE_SIZE == 2);
+static_assert(TAPROOT_PATH_CHUNK_NODE_COUNT * TAPROOT_CONTROL_NODE_SIZE <= MAX_SCRIPT_ELEMENT_SIZE_REDUCED);
+static_assert(TAPROOT_CONTROL_EXT_NODE_COUNT < TAPROOT_CONTROL_MAX_NODE_COUNT);
+
+/** How many path chunks an extended control block announces, or 0 for a flat one.
+ *
+ * The marker is the size: a flat control block is 1 mod TAPROOT_CONTROL_NODE_SIZE and an
+ * extended one is 2, so no flat control block can be read as extended or the reverse. Policy
+ * and consensus both ask here, so the layout has one definition. */
+size_t TaprootPathChunkCount(Span<const unsigned char> control);
+
+/** Whether any input looks like it carries its Taproot merkle path in chunks, an encoding only
+ *  SCRIPT_VERIFY_CHUNKED_TAPPATH accepts. Lets the mempool drop such entries when a reorg puts
+ *  the chain back before activation, where they would otherwise wedge the block assembler.
+ *
+ *  Never a false negative, which is the direction that matters: a real chunked spend always
+ *  presents its control block on top once the annex is dropped. It can be a false positive,
+ *  since it does not consult the output being spent, so a witness whose top item happens to
+ *  match the shape is evicted too. Eviction is always safe and the sender rebroadcasts. */
+bool UsesChunkedTappath(const CTransaction& tx);
 
 extern const HashWriter HASHER_TAPSIGHASH; //!< Hasher with tag "TapSighash" pre-fed to it.
 extern const HashWriter HASHER_TAPLEAF;    //!< Hasher with tag "TapLeaf" pre-fed to it.
