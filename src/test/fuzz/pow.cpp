@@ -122,3 +122,72 @@ FUZZ_TARGET(pow_transition, .init = initialize_pow)
     unsigned int new_nbits{GetNextWorkRequired(last_block, nullptr, consensus_params)};
     Assert(PermittedDifficultyTransition(consensus_params, last_block->nHeight + 1, last_block->nBits, new_nbits));
 }
+
+// Same shape as pow_transition, but reaching the hardfork's contiguous-window rule,
+// which pow_transition cannot: it builds exactly one difficulty period, so
+// nHeightFirst is 0 and the rule's `nHeightFirst > 0` guard short-circuits. Two
+// periods and a finite HardforkTime are what it takes to exercise the changed path.
+//
+// The invariant is the one that matters for headers sync: whatever the rule computes
+// must still be a transition PermittedDifficultyTransition() accepts, or a node would
+// reject retargets produced by its own consensus code.
+FUZZ_TARGET(pow_transition_hardfork, .init = initialize_pow)
+{
+    FuzzedDataProvider fuzzed_data_provider(buffer.data(), buffer.size());
+    Consensus::Params consensus_params{Params().GetConsensus()};
+    std::vector<std::unique_ptr<CBlockIndex>> blocks;
+
+    consensus_params.HardforkTime = fuzzed_data_provider.ConsumeIntegral<uint32_t>();
+
+    // Shorten the retarget interval so one input can carry real entropy for every
+    // header: at mainnet's 2016 a single case would need ~16KB before the provider
+    // runs dry and starts handing out zeros. The rule is arithmetic on the interval,
+    // so exercising several is better coverage than exercising one at great cost.
+    const int64_t interval{fuzzed_data_provider.PickValueInArray<int64_t>({4, 16, 144})};
+    consensus_params.nPowTargetSpacing = consensus_params.nPowTargetTimespan / interval;
+    // Mainnet leaves this false, so nothing else reaches the branch of
+    // CalculateNextWorkRequired that picks whose nBits to retarget from, which is the
+    // window the rule deliberately does NOT move.
+    consensus_params.enforce_BIP94 = fuzzed_data_provider.ConsumeBool();
+
+    const int32_t version{fuzzed_data_provider.ConsumeIntegral<int32_t>()};
+    uint32_t nbits{fuzzed_data_provider.ConsumeIntegral<uint32_t>()};
+    const arith_uint256 pow_limit = UintToArith256(consensus_params.powLimit);
+    arith_uint256 old_target;
+    old_target.SetCompact(nbits);
+    if (old_target > pow_limit) {
+        nbits = pow_limit.GetCompact();
+    }
+
+    // Two difficulty periods, so the retarget has a predecessor window to measure from.
+    Assert(consensus_params.DifficultyAdjustmentInterval() == interval);
+    for (int height = 0; height < 2 * interval; ++height) {
+        CBlockHeader header;
+        header.nVersion = version;
+        header.nTime = fuzzed_data_provider.ConsumeIntegral<uint32_t>();
+        header.nBits = nbits;
+        auto current_block{std::make_unique<CBlockIndex>(header)};
+        current_block->pprev = blocks.empty() ? nullptr : blocks.back().get();
+        current_block->nHeight = height;
+        blocks.emplace_back(std::move(current_block));
+    }
+
+    auto last_block{blocks.back().get()};
+    CBlockHeader next;
+    next.nVersion = version;
+    next.nTime = fuzzed_data_provider.ConsumeIntegral<uint32_t>();
+    next.nBits = nbits;
+
+    const unsigned int new_nbits{GetNextWorkRequired(last_block, &next, consensus_params)};
+
+    // The window the rule selected, asserted directly. PermittedDifficultyTransition
+    // alone cannot catch a wrong window: it recomputes its bounds from the same
+    // old_nbits that CalculateNextWorkRequired already clamped to, so any ancestor's
+    // timestamp satisfies it. This differential does bind the window, and fails if the
+    // rule picks the wrong one.
+    const bool forked{next.GetBlockTime() >= consensus_params.HardforkTime};
+    const size_t first{static_cast<size_t>(forked ? interval - 1 : interval)};
+    Assert(new_nbits == CalculateNextWorkRequired(last_block, blocks[first]->GetBlockTime(), consensus_params));
+
+    Assert(PermittedDifficultyTransition(consensus_params, last_block->nHeight + 1, last_block->nBits, new_nbits));
+}
