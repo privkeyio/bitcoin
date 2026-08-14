@@ -26,6 +26,8 @@ class arith_uint256;
  */
 std::optional<arith_uint256> DeriveTarget(unsigned int nBits, const uint256 pow_limit);
 
+/** pblock must be non-null at a retarget: from the fork onward the required work
+ *  depends on the candidate block's own timestamp, not only on the connected chain. */
 unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHeader *pblock, const Consensus::Params&);
 unsigned int CalculateNextWorkRequired(const CBlockIndex* pindexLast, int64_t nFirstBlockTime, const Consensus::Params&);
 

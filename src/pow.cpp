@@ -40,6 +40,14 @@ unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast, const CBlockHead
 
     // Go back by what we want to be 14 days worth of blocks
     int nHeightFirst = pindexLast->nHeight - (params.DifficultyAdjustmentInterval()-1);
+    // HARDFORK-PLUMBING: measure from the previous window's last block, so every
+    // inter-block interval is measured once and the seam the timewarp attack drives is
+    // gone. Keyed to the block's own timestamp, matching the PoW rule, so a period that
+    // began before the fork is still measured under the new rule if the block closing
+    // it has reached the trigger. The first period has no predecessor and keeps the old
+    // start; that guard must stay the first conjunct, since the short-circuit is what
+    // lets the pow fuzz target pass a null header.
+    if (nHeightFirst > 0 && Assert(pblock)->GetBlockTime() >= params.HardforkTime) --nHeightFirst;
     assert(nHeightFirst >= 0);
     const CBlockIndex* pindexFirst = pindexLast->GetAncestor(nHeightFirst);
     assert(pindexFirst);
@@ -68,6 +76,9 @@ unsigned int CalculateNextWorkRequired(const CBlockIndex* pindexLast, int64_t nF
         // Here we use the first block of the difficulty period. This way
         // the real difficulty is always preserved in the first block as
         // it is not allowed to use the min-difficulty exception.
+        // This window start selects whose nBits to retarget from, which is a different
+        // question from which timespan to measure, so it does not move with the
+        // hardfork rule in GetNextWorkRequired().
         int nHeightFirst = pindexLast->nHeight - (params.DifficultyAdjustmentInterval()-1);
         const CBlockIndex* pindexFirst = pindexLast->GetAncestor(nHeightFirst);
         bnNew.SetCompact(pindexFirst->nBits);
