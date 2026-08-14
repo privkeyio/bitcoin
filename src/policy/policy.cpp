@@ -349,6 +349,18 @@ bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs,
     return true;
 }
 
+/** Drop the Taproot merkle path chunks a control block announces, so what remains is the
+ *  script and its arguments however the path was serialised. False if the stack is too short,
+ *  which consensus rejects. Unconditional on the hardfork: a witness in this shape is invalid
+ *  before it, so nothing reachable is loosened by reading it here. */
+static bool DropChunkedTappath(Span<const std::vector<unsigned char>>& stack, const std::vector<unsigned char>& control)
+{
+    const size_t chunks{TaprootPathChunkCount(control)};
+    if (stack.size() < chunks) return false;
+    for (size_t i{0}; i < chunks; ++i) SpanPopBack(stack);
+    return true;
+}
+
 bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs, const std::string& reason_prefix, std::string& out_reason, const ignore_rejects_type& ignore_rejects)
 {
     if (tx.IsCoinBase())
@@ -433,12 +445,33 @@ bool IsWitnessStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs,
             if (stack.size() >= 2) {
                 // Script path spend (2 or more stack elements after removing optional annex)
                 const auto& control_block = SpanPopBack(stack);
-                SpanPopBack(stack); // Ignore script
                 if (control_block.empty()) {
                     // Empty control block is invalid
                     out_reason = reason_prefix + "taproot-control-missing";
                     return false;
                 }
+                if (!DropChunkedTappath(stack, control_block)) {
+                    // Chunk count larger than the stack; invalid by consensus.
+                    out_reason = reason_prefix + "taproot-control-missing";
+                    return false;
+                }
+                // The hardfork retires the flat encoding above this size, which is a
+                // *restriction* arriving at a flag day. The mempool never revalidates what it
+                // already holds, and the block assembler throws rather than skipping an entry
+                // that has become invalid, so an entry accepted under the old rule would halt
+                // block production at activation. Refuse it from now, unconditionally, so no
+                // such entry can exist to be stranded. SCRIPT_VERIFY_REDUCED_DATA rejects the
+                // same witness today, but a caller passing ignore_rejects of
+                // "non-mandatory-script-verify-flag" drops that flag wholesale; this check has
+                // its own name and so is given up only deliberately.
+                if (TaprootPathChunkCount(control_block) == 0 && control_block.size() > TAPROOT_CONTROL_MAX_SIZE_REDUCED) {
+                    MaybeReject("taproot-control-size");
+                }
+                if (stack.empty()) {
+                    out_reason = reason_prefix + "taproot-witness-missing";
+                    return false;
+                }
+                SpanPopBack(stack); // Ignore script
                 if ((control_block[0] & TAPROOT_LEAF_MASK) == TAPROOT_LEAF_TAPSCRIPT) {
                     // Leaf version 0xc0 (aka Tapscript, see BIP 342)
                     if (!ignore_rejects.count(reason_prefix + "taproot-stackitem-size")) {
@@ -552,7 +585,10 @@ std::pair<CScript, unsigned int> GetScriptForTransactionInput(CScript prevScript
             SpanPopBack(stack);
         }
         if (stack.size() >= 2) {
-            SpanPopBack(stack);  // Ignore control block
+            const auto& control_block = SpanPopBack(stack);
+            if (!DropChunkedTappath(stack, control_block) || stack.empty()) {
+                return std::make_pair(CScript(), 0);  // invalid
+            }
             prevScript = CScript(stack.back().begin(), stack.back().end());
             return std::make_pair(prevScript, 1);
         }
