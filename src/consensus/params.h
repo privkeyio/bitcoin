@@ -105,6 +105,35 @@ struct Params {
      * Note that segwit v0 script rules are enforced on all blocks except the
      * BIP 16 exception blocks. */
     int SegwitHeight;
+    /** HARDFORK-PLUMBING: the PoW change branch owns this field.
+     *
+     * Defined here so this branch stands alone and can be reviewed and tested
+     * without depending on that one. When the two are combined, delete this
+     * declaration and use the one the PoW change already provides; it has the
+     * same name, type and default, so nothing else here needs to change.
+     *
+     * Timestamp at which the hardfork activates.
+     *
+     * This is the single trigger for every rule the hardfork changes, so they
+     * all key off one configured value: the proof-of-work change, the signature
+     * hash, and anything else the fork carries.
+     *
+     * It is a time rather than a height because the proof-of-work change has no
+     * choice: CBlockHeader::GetHash() selects the algorithm with no chain
+     * context available, and the header carries a timestamp but not a height.
+     *
+     * Consensus compares the block's own timestamp, matching the proof-of-work
+     * change, so every rule the fork carries switches on at the same instant.
+     *
+     * Policy compares the *parent's* median time past instead, because a miner
+     * chooses its own nTime and has not chosen it yet. Median time past is
+     * monotonic and fixed by blocks that are already connected, so the mempool
+     * and the wallet can tell which rules the next block will use. A valid
+     * block's timestamp exceeds its parent's median time past, so policy is
+     * never looser than consensus, only later.
+     *
+     * Defaults to never; the fork is not scheduled on any network. */
+    int64_t HardforkTime{std::numeric_limits<int64_t>::max()};
     /** Don't warn about unknown BIP 9 activations below this height.
      * This prevents us from warning about the CSV and segwit activations. */
     int MinBIP9WarningHeight;

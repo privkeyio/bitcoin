@@ -56,6 +56,12 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
     if (auto value = args.GetBoolArg("-fastprune")) options.fastprune = *value;
     if (HasTestOption(args, "bip94")) options.enforce_bip94 = true;
 
+    // HARDFORK-PLUMBING: the PoW change branch provides its own regtest option
+    // for scheduling the fork. Drop this block when the two are combined.
+    if (args.IsArgSet("-hardforktime")) {
+        options.hardfork_time = args.GetIntArg("-hardforktime", 0);
+    }
+
     for (const std::string& arg : args.GetArgs("-testactivationheight")) {
         const auto found{arg.find('@')};
         if (found == std::string::npos) {

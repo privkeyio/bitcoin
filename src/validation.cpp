@@ -45,6 +45,7 @@
 #include <primitives/block.h>
 #include <primitives/transaction.h>
 #include <random.h>
+#include <script/interpreter.h>
 #include <script/script.h>
 #include <script/sigcache.h>
 #include <signet.h>
@@ -270,6 +271,41 @@ bool CheckSequenceLocksAtTip(CBlockIndex* tip,
 // Returns the script flags which should be checked for a given block
 static unsigned int GetBlockScriptFlags(const CBlockIndex& block_index, const ChainstateManager& chainman);
 
+/** Whether the hardfork rules apply to `block_index` itself. Consensus.
+ *
+ * Compares the block's own timestamp, exactly as the proof of work change does,
+ * so every rule the fork carries switches on at the same instant.
+ *
+ * Safe against the mempool predicate below despite reading a different clock: a
+ * block's timestamp must exceed its parent's median time past, so whenever that
+ * median has reached HardforkTime the block's own timestamp has too. Policy is
+ * therefore never looser than consensus, only later. */
+static bool HardforkActiveForBlock(const CBlockIndex& block_index, const Consensus::Params& params)
+{
+    return block_index.GetBlockTime() >= params.HardforkTime;
+}
+
+/** Whether the hardfork rules will apply to a block built on `pindexPrev`. Policy.
+ *
+ * Compares the parent's median time past rather than the block's own timestamp,
+ * because the miner has not chosen that timestamp yet. The median is monotonic
+ * and already fixed by connected blocks, so the mempool, the block builder and
+ * the wallet all reach the same answer in advance. */
+static bool HardforkActiveAfter(const CBlockIndex* pindexPrev, const Consensus::Params& params)
+{
+    return pindexPrev != nullptr && pindexPrev->GetMedianTimePast() >= params.HardforkTime;
+}
+
+/** The hardfork script flags for the block that would be built on top of `tip`.
+ *
+ * The mempool must be at least as strict as the rules for the block being
+ * built, or transactions accepted under the tip's rules become unminable the
+ * moment the fork activates and block production stops. */
+static unsigned int ChunkedTappathFlagForNextBlock(const CBlockIndex& tip, const Consensus::Params& params)
+{
+    return HardforkActiveAfter(&tip, params) ? uint32_t{SCRIPT_VERIFY_CHUNKED_TAPPATH} : uint32_t{0};
+}
+
 /** Compute accurate total signature operation cost of a transaction.
  *  Not consensus-critical, since legacy sigops counting is always used in the protocol.
  */
@@ -384,6 +420,26 @@ void Chainstate::MaybeUpdateMempoolForReorg(
         AssertLockHeld(m_mempool->cs);
         AssertLockHeld(::cs_main);
         const CTransaction& tx = it->GetTx();
+
+        // A reorg can move the chain across the hardfork activation. Script checks are not
+        // re-run for mempool entries, and the block assembler throws rather than skipping an
+        // entry that has become invalid, so an entry accepted under a different fork state has
+        // to go: otherwise block production stops until the mempool is cleared by hand.
+        const Consensus::Params& hf_params{m_chainman.GetConsensus()};
+        if (hf_params.HardforkTime != std::numeric_limits<int64_t>::max()) {
+            // The chunked path encoding is valid only under the fork's rules, so on a tip that
+            // is back before activation the entry must go, whatever height it was accepted at.
+            // Recognising it from the witness keeps this exact and keeps it local to the rule
+            // this branch adds; a general "was this accepted under the other fork state" test
+            // needs the state recorded on the entry at acceptance, which is a change to the
+            // mempool entry and belongs to whichever branch introduces the trigger for real.
+            // The other direction needs nothing here: a witness the fork makes invalid cannot
+            // be in the mempool to begin with, because IsWitnessStandard refuses it from the
+            // moment this code ships.
+            if (!HardforkActiveAfter(m_chain.Tip(), hf_params) && UsesChunkedTappath(tx)) {
+                return true;
+            }
+        }
 
         // The transaction must be final.
         if (!CheckFinalTxAtTip(*Assert(m_chain.Tip()), tx)) return true;
@@ -1514,7 +1570,10 @@ bool MemPoolAccept::PolicyScriptChecks(const ATMPArgs& args, Workspace& ws)
     const CTransaction& tx = *ws.m_ptx;
     TxValidationState& state = ws.m_state;
 
-    const unsigned int scriptVerifyFlags = PolicyScriptVerifyFlags(args.m_ignore_rejects);
+    // Taken from the next block's rules rather than the tip's, matching
+    // ConsensusScriptChecks below.
+    const unsigned int scriptVerifyFlags = PolicyScriptVerifyFlags(args.m_ignore_rejects) |
+        ChunkedTappathFlagForNextBlock(*m_active_chainstate.m_chain.Tip(), m_active_chainstate.m_chainman.GetConsensus());
 
     // Check input scripts and signatures.
     // This is done last to help prevent CPU exhaustion denial-of-service attacks.
@@ -1553,7 +1612,14 @@ bool MemPoolAccept::ConsensusScriptChecks(const ATMPArgs& args, Workspace& ws)
     // There is a similar check in CreateNewBlock() to prevent creating
     // invalid blocks (using TestBlockValidity), however allowing such
     // transactions into the mempool can be exploited as a DoS attack.
-    unsigned int currentBlockScriptVerifyFlags{GetBlockScriptFlags(*m_active_chainstate.m_chain.Tip(), m_active_chainstate.m_chainman)};
+    // GetBlockScriptFlags answers whether the fork applied to the tip, from the
+    // tip's own timestamp. That is the consensus question and the wrong one
+    // here: the miner has not chosen the next block's timestamp yet and may
+    // still set it below HardforkTime, which would make anything accepted under
+    // the fork's rules unminable. Drop that bit and take the next block's rules
+    // from the parent's median time past instead, matching PolicyScriptChecks.
+    unsigned int currentBlockScriptVerifyFlags{GetBlockScriptFlags(*m_active_chainstate.m_chain.Tip(), m_active_chainstate.m_chainman) & ~uint32_t{SCRIPT_VERIFY_CHUNKED_TAPPATH}};
+    currentBlockScriptVerifyFlags |= ChunkedTappathFlagForNextBlock(*m_active_chainstate.m_chain.Tip(), m_active_chainstate.m_chainman.GetConsensus());
     if (!CheckInputsFromMempoolAndCache(tx, state, m_view, m_pool, currentBlockScriptVerifyFlags,
                                         ws.m_precomputed_txdata, m_active_chainstate.CoinsTip(), GetValidationCache())) {
         LogError("BUG! PLEASE REPORT THIS! CheckInputScripts failed against latest-block but not STANDARD flags %s, %s", hash.ToString(), state.ToString());
@@ -2698,6 +2764,12 @@ static unsigned int GetBlockScriptFlags(const CBlockIndex& block_index, const Ch
     // Enforce BIP147 NULLDUMMY (activated simultaneously with segwit)
     if (DeploymentActiveAt(block_index, chainman, Consensus::DEPLOYMENT_SEGWIT)) {
         flags |= SCRIPT_VERIFY_NULLDUMMY;
+    }
+
+    // Hardfork Taproot path encoding. Keyed on this block's own timestamp, like
+    // the proof of work change, so the whole fork switches on together.
+    if (HardforkActiveForBlock(block_index, consensusparams)) {
+        flags |= SCRIPT_VERIFY_CHUNKED_TAPPATH;
     }
 
     if (DeploymentActiveAt(block_index, chainman, Consensus::DEPLOYMENT_REDUCED_DATA)) {

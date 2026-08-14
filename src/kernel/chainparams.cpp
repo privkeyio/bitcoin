@@ -651,6 +651,12 @@ public:
         m_assumed_blockchain_size = 0;
         m_assumed_chain_state_size = 0;
 
+        // HARDFORK-PLUMBING: drop when combined with the PoW change branch,
+        // which sets consensus.HardforkTime from its own option.
+        if (opts.hardfork_time) {
+            consensus.HardforkTime = *opts.hardfork_time;
+        }
+
         for (const auto& [dep, height] : opts.activation_heights) {
             switch (dep) {
             case Consensus::BuriedDeployment::DEPLOYMENT_SEGWIT:
