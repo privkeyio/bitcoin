@@ -24,6 +24,11 @@
 
 using util::SplitString;
 
+//! HARDFORK-PLUMBING: signet's genesis timestamp. A trigger strictly before this
+//! could only have come from a parse failure or a typo; one exactly at it activates
+//! from genesis, which the tests rely on.
+static constexpr int64_t MIN_HARDFORK_TIME{1598918400};
+
 void ReadSigNetArgs(const ArgsManager& args, CChainParams::SigNetOptions& options)
 {
     if (!args.GetArgs("-signetseednode").empty()) {
@@ -48,6 +53,18 @@ void ReadSigNetArgs(const ArgsManager& args, CChainParams::SigNetOptions& option
             throw std::runtime_error("-signetblocktime must be greater than 0");
         }
         options.pow_target_spacing = *signetblocktime;
+    }
+    // HARDFORK-PLUMBING: test-only trigger for the fork rules on a custom signet.
+    if (const auto hardforktime{args.GetIntArg("-hardforktime")}) {
+        if (!args.IsArgSet("-signetchallenge")) {
+            throw std::runtime_error("-hardforktime cannot be set without -signetchallenge");
+        }
+        // Unparseable input reads as 0 here, which would silently activate the fork
+        // from genesis, so require a plausible timestamp rather than any integer.
+        if (*hardforktime < MIN_HARDFORK_TIME) {
+            throw std::runtime_error(strprintf("-hardforktime must be at least %d", MIN_HARDFORK_TIME));
+        }
+        options.hardfork_time = *hardforktime;
     }
 }
 

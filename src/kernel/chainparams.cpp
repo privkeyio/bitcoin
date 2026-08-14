@@ -536,6 +536,7 @@ public:
         consensus.SegwitHeight = 1;
         consensus.nPowTargetTimespan = 14 * 24 * 60 * 60; // two weeks
         consensus.nPowTargetSpacing = options.pow_target_spacing;
+        consensus.HardforkTime = options.hardfork_time; // HARDFORK-PLUMBING
         consensus.fPowAllowMinDifficultyBlocks = false;
         consensus.enforce_BIP94 = false;
         consensus.fPowNoRetargeting = false;
