@@ -30,6 +30,12 @@ FUZZ_TARGET(script_flags)
         unsigned int fuzzed_flags;
         ds >> fuzzed_flags;
 
+        // The loop below asserts that removing flags cannot invalidate a passing spend, which
+        // holds only for flags that restrict. SCRIPT_VERIFY_CHUNKED_TAPPATH also relaxes: it
+        // accepts a chunked Taproot merkle path that is invalid without it. Hold it fixed rather
+        // than toggling it, so the invariant stays true of what is toggled.
+        fuzzed_flags &= ~(unsigned int)SCRIPT_VERIFY_CHUNKED_TAPPATH;
+
         std::vector<CTxOut> spent_outputs;
         for (unsigned i = 0; i < tx.vin.size(); ++i) {
             CTxOut prevout;
