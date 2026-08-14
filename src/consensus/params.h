@@ -132,6 +132,10 @@ struct Params {
         return std::chrono::seconds{nPowTargetSpacing};
     }
     int64_t DifficultyAdjustmentInterval() const { return nPowTargetTimespan / nPowTargetSpacing; }
+    /** HARDFORK-PLUMBING: block timestamp at which the fork's rules take effect,
+     *  compared against a block's own timestamp. Declared here only so this branch
+     *  stands alone; delete it when combining with the branch that owns the fork. */
+    int64_t HardforkTime{std::numeric_limits<int64_t>::max()};
     /** The best chain should have at least this much work */
     uint256 nMinimumChainWork;
     /** By default assume that the signatures in ancestors of this block are valid */
