@@ -145,6 +145,33 @@ class PSBTTest(BitcoinTestFramework):
         self.connect_nodes(1, 0)
         self.connect_nodes(0, 2)
 
+    def test_sighash_single(self):
+        self.log.info("Test that SIGHASH_SINGLE won't sign an input with no matching output")
+        node = self.nodes[0]
+        node.createwallet("sighash_single")
+        wallet = node.get_wallet_rpc("sighash_single")
+        def_wallet = node.get_wallet_rpc(self.default_wallet_name)
+
+        addr_types = ["legacy", "bech32", "bech32m"] if self.options.descriptors else ["legacy", "bech32"]
+        for addr_type in addr_types:
+            addrs = [wallet.getnewaddress("", addr_type) for _ in range(2)]
+            for addr in addrs:
+                def_wallet.sendtoaddress(addr, 1)
+            self.generatetoaddress(node, 1, def_wallet.getnewaddress())
+            node.syncwithvalidationinterfacequeue()
+            ins = [{"txid": u["txid"], "vout": u["vout"]} for u in wallet.listunspent(addresses=addrs)]
+            assert_equal(len(ins), 2)
+
+            raw = node.createrawtransaction(ins, [{wallet.getnewaddress(): 1.9999}])
+            signed = wallet.walletprocesspsbt(node.converttopsbt(raw), True, "SINGLE")["psbt"]
+            state = wallet.analyzepsbt(signed)["inputs"]
+            # Output at index 0 exist, so input 0 signs and finalizes
+            assert state[0]["is_final"]
+            # No output at index 1, so SIGHASH_SINGLE won't sign input 1
+            assert not state[1]["is_final"]
+
+        wallet.unloadwallet()
+
     def test_input_confs_control(self):
         self.nodes[0].createwallet("minconf")
         wallet = self.nodes[0].get_wallet_rpc("minconf")
@@ -659,6 +686,7 @@ class PSBTTest(BitcoinTestFramework):
         self.test_psbt_incomplete_after_invalid_modification()
 
         self.test_input_confs_control()
+        self.test_sighash_single()
 
         # Test that psbts with p2pkh outputs are created properly
         p2pkh = self.nodes[0].getnewaddress(address_type='legacy')
