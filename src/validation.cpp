@@ -1547,9 +1547,6 @@ unsigned int PolicyScriptVerifyFlags(const ignore_rejects_type& ignore_rejects)
             flags &= ~SCRIPT_VERIFY_CLEANSTACK;
         }
     }
-    if (ignore_rejects.count("non-mandatory-script-verify-flag-strictenc")) {
-        flags &= ~SCRIPT_VERIFY_STRICTENC;
-    }
     if (ignore_rejects.count("non-mandatory-script-verify-flag-minimalif")) {
         flags &= ~SCRIPT_VERIFY_MINIMALIF;
     }

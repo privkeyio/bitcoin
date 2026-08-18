@@ -323,19 +323,25 @@ because a wallet that knows about the fork opts in on their behalf without being
 asked.
 
 **Compatibility.** The claim above holds for everything reachable in practice,
-but not for every conceivable script. The check that a hash type is one of the
-defined values is policy, not consensus: `SCRIPT_VERIFY_STRICTENC` is absent from
-the mandatory flags, and the legacy message commits to the byte whatever it is.
-So a bare, P2SH or segwit v0 signature whose hash type already has this bit set
-is consensus-valid today, and after activation it is read under the new algorithm
-and stops verifying.
+but not for every conceivable script. Historically the check that a hash type is
+one of the defined values was policy rather than consensus, and the legacy
+message commits to the byte whatever it is, so a bare, P2SH or segwit v0
+signature whose hash type already had this bit set was consensus-valid and would
+stop verifying at activation.
 
-Reaching that state takes deliberate effort. Such a transaction is non-standard,
-so no node relays it and it can only enter a block direct from a miner, and it
-has to have been signed before activation and held. No choice of bit avoids it:
-consensus accepts every hash type byte for these input types, so there is no
-unused value to claim. Taproot is unaffected, since BIP341 already makes
-undefined hash types invalid at consensus.
+`SCRIPT_VERIFY_STRICTENC` is now one of the reduced-data mandatory flags, which
+closes that for any coin created after the reduced-data deployment: such a
+signature is rejected at consensus rather than only by policy, so it cannot be
+mined and then be invalidated by the fork. Coins that predate the deployment keep
+the old behavior, since those flags are relaxed per input for them, and that
+remaining window is the exception this section records.
+
+Reaching it takes deliberate effort. Such a transaction is non-standard, so no
+node relays it, it can only enter a block direct from a miner, and it has to have
+been signed before activation and held. No choice of bit avoids it: consensus
+accepted every hash type byte for these input types, so there is no unused value
+to claim. Taproot is unaffected, since BIP341 already makes undefined hash types
+invalid at consensus.
 
 The choice has a cost. Protection reaches a spender only if their signer knows
 about the fork. A signature produced by one that does not, an external signer, a
