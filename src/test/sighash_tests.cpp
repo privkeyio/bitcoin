@@ -443,18 +443,26 @@ BOOST_AUTO_TEST_CASE(unified_sighash_sign_and_verify_roundtrip)
         return VerifyScript(t.vin[0].scriptSig, spk, nullptr, flags, checker, &err);
     };
 
-    // Sign under the hardfork rules.
-    CMutableTransaction unified_tx{tx};
-    SignatureData hf_sigdata;
-    MutableTransactionSignatureCreator hf_creator{unified_tx, 0, spent[0].nValue, &txdata, SIGHASH_ALL};
-    hf_creator.SetSighashRules(SighashRules::UNIFIED);
-    BOOST_CHECK(ProduceSignature(keystore, hf_creator, spk, hf_sigdata));
-    UpdateInput(unified_tx.vin[0], hf_sigdata);
+    // Sign under the hardfork rules, for every hash type the opt-in bit defines.
+    for (const int32_t base_type : {SIGHASH_ALL, SIGHASH_NONE, SIGHASH_SINGLE}) {
+        for (const int32_t anyonecanpay : {0, int32_t{SIGHASH_ANYONECANPAY}}) {
+            const int32_t hashtype{base_type | anyonecanpay};
+            CMutableTransaction unified_tx{tx};
+            SignatureData hf_sigdata;
+            MutableTransactionSignatureCreator hf_creator{unified_tx, 0, spent[0].nValue, &txdata, hashtype};
+            hf_creator.SetSighashRules(SighashRules::UNIFIED);
+            BOOST_CHECK_MESSAGE(ProduceSignature(keystore, hf_creator, spk, hf_sigdata),
+                                strprintf("hash type %#x should be signable", hashtype));
+            UpdateInput(unified_tx.vin[0], hf_sigdata);
 
-    // Signing and validation agree, and the signature is worthless to a node
-    // running the old rules.
-    BOOST_CHECK(verify(unified_tx, /*hf=*/true));
-    BOOST_CHECK(!verify(unified_tx, /*hf=*/false));
+            // Signing and validation agree, and the signature is worthless to a node
+            // running the old rules.
+            BOOST_CHECK_MESSAGE(verify(unified_tx, /*hf=*/true),
+                                strprintf("hash type %#x should verify under the fork", hashtype));
+            BOOST_CHECK_MESSAGE(!verify(unified_tx, /*hf=*/false),
+                                strprintf("hash type %#x should not verify under legacy rules", hashtype));
+        }
+    }
 
     // Sign under the legacy rules.
     CMutableTransaction legacy_tx{tx};
