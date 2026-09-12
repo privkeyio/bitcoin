@@ -433,12 +433,13 @@ void Chainstate::MaybeUpdateMempoolForReorg(
 
         // If the transaction spends any coinbase outputs, it must be mature.
         if (it->GetSpendsCoinbase()) {
+            const auto mempool_spend_height{m_chain.Tip()->nHeight + 1};
+            const CoinbaseMaturity maturity{m_chainman.GetConsensus().CoinbaseMaturityInForce(m_chain.Tip()->GetMedianTimePast())};
             for (const CTxIn& txin : tx.vin) {
                 if (m_mempool->exists(GenTxid::Txid(txin.prevout.hash))) continue;
                 const Coin& coin{CoinsTip().AccessCoin(txin.prevout)};
                 assert(!coin.IsSpent());
-                const auto mempool_spend_height{m_chain.Tip()->nHeight + 1};
-                if (coin.IsCoinBase() && mempool_spend_height - coin.nHeight < COINBASE_MATURITY) {
+                if (coin.IsCoinBase() && mempool_spend_height - coin.nHeight < maturity.Required(coin.nHeight)) {
                     return true;
                 }
             }
@@ -1015,7 +1016,9 @@ bool MemPoolAccept::PreChecks(ATMPArgs& args, Workspace& ws)
     // The mempool holds txs for the next block, so pass height+1 to CheckTxInputs
     const auto block_height_current = m_active_chainstate.m_chain.Height();
     const auto block_height_next = block_height_current + 1;
-    if (!Consensus::CheckTxInputs(tx, state, m_view, block_height_next, ws.m_base_fees, CheckTxInputsRules::OutputSizeLimit)) {
+    const Consensus::Params& consensus{m_active_chainstate.m_chainman.GetConsensus()};
+    if (!Consensus::CheckTxInputs(tx, state, m_view, block_height_next, ws.m_base_fees, CheckTxInputsRules::OutputSizeLimit,
+                                  consensus.CoinbaseMaturityInForce(Assert(m_active_chainstate.m_chain.Tip())->GetMedianTimePast()))) {
         return false; // state filled in by CheckTxInputs
     }
 
@@ -2976,7 +2979,8 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
     // Grandfathering below compares each input's creating height against the
     // fork height: activation and the exemption boundary are the same instant
     // by construction.
-    const bool reduced_data_active{params.GetConsensus().RdtsActiveAt(pindex->nHeight, Assert(pindex->pprev)->GetMedianTimePast())};
+    const int64_t mtp_prev{Assert(pindex->pprev)->GetMedianTimePast()};
+    const bool reduced_data_active{params.GetConsensus().RdtsActiveAt(pindex->nHeight, mtp_prev)};
     const auto reduced_data_start_height = reduced_data_active
         ? params.GetConsensus().RdtsActivationHeight()
         : 0;
@@ -3020,7 +3024,8 @@ bool Chainstate::ConnectBlock(const CBlock& block, BlockValidationState& state, 
         {
             CAmount txfee = 0;
             TxValidationState tx_state;
-            if (!Consensus::CheckTxInputs(tx, tx_state, view, pindex->nHeight, txfee, chk_input_rules)) {
+            if (!Consensus::CheckTxInputs(tx, tx_state, view, pindex->nHeight, txfee, chk_input_rules,
+                                          params.GetConsensus().CoinbaseMaturityInForce(mtp_prev))) {
                 // Any transaction validation failure in ConnectBlock is a block consensus failure
                 state.Invalid(BlockValidationResult::BLOCK_CONSENSUS,
                               tx_state.GetRejectReason(),
