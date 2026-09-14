@@ -675,6 +675,9 @@ public:
         // RDTS expiry scheduled above.
         if (opts.extended_coinbase_maturity_start_time) {
             consensus.ExtendedCoinbaseMaturityStartTime = *opts.extended_coinbase_maturity_start_time;
+            if (opts.extended_coinbase_maturity_end_time) {
+                consensus.ExtendedCoinbaseMaturityEndTime = *opts.extended_coinbase_maturity_end_time;
+            }
         }
 
         for (const auto& [deployment_pos, version_bits_params] : opts.version_bits_parameters) {

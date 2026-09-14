@@ -1984,7 +1984,7 @@ void ExtendedCoinbaseMaturityDescPushBack(const CBlockIndex* blockindex, UniValu
     if (mtp >= params.ExtendedCoinbaseMaturityStartTime) {
         height = MedianTimePastActivationHeight(*blockindex, params.ExtendedCoinbaseMaturityStartTime);
     }
-    FlagDayDescPushBack(softforks, "extended_coinbase_maturity", height, params.ExtendedCoinbaseMaturityStartTime, params.RdtsExpiryTime,
+    FlagDayDescPushBack(softforks, "extended_coinbase_maturity", height, params.ExtendedCoinbaseMaturityStartTime, params.ExtendedCoinbaseMaturityExpiry(),
                         params.ExtendedCoinbaseMaturityActiveAt(mtp));
 }
 

@@ -134,7 +134,16 @@ class ExtendedCoinbaseMaturityTest(BitcoinTestFramework):
             expected_msg='Error: -extendedcoinbasematurity requires -rdtsexpiry=<time> (the rule expires with RDTS).')
         node.assert_start_raises_init_error(
             extra_args=[f'-testactivationheight=blake2b@{BLAKE2B_HEIGHT}', f'-rdtsexpiry={EXPIRY}', f'-extendedcoinbasematurity={EXPIRY}'],
-            expected_msg=f'Error: Invalid start ({EXPIRY}) for -extendedcoinbasematurity=<time>: must precede the RDTS expiry ({EXPIRY}).')
+            expected_msg=f'Error: Invalid start ({EXPIRY}) for -extendedcoinbasematurity=<start>[:<end>]: must precede the RDTS expiry ({EXPIRY}).')
+        # An end that does not follow the start, or that outlasts the RDTS
+        # expiry, would schedule a window the rule could never keep.
+        for end in (START, EXPIRY + 1):
+            node.assert_start_raises_init_error(
+                extra_args=[f'-testactivationheight=blake2b@{BLAKE2B_HEIGHT}', f'-rdtsexpiry={EXPIRY}', f'-extendedcoinbasematurity={START}:{end}'],
+                expected_msg=f'Error: Invalid end ({START}:{end}) for -extendedcoinbasematurity=<start>[:<end>]: must follow the start and not outlast the RDTS expiry ({EXPIRY}).')
+        node.assert_start_raises_init_error(
+            extra_args=[f'-testactivationheight=blake2b@{BLAKE2B_HEIGHT}', f'-rdtsexpiry={EXPIRY}', f'-extendedcoinbasematurity={START}:{EXPIRY}:1'],
+            expected_msg=f'Error: Invalid format ({START}:{EXPIRY}:1) for -extendedcoinbasematurity=<start>[:<end>].')
         self.start_node(0)
         node.add_p2p_connection(P2PInterface())  # getblocktemplate needs a peer
 

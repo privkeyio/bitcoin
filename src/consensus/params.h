@@ -8,6 +8,7 @@
 
 #include <uint256.h>
 
+#include <algorithm>
 #include <chrono>
 #include <limits>
 #include <map>
@@ -140,6 +141,15 @@ struct Params {
      * median-time-past).
      */
     int64_t ExtendedCoinbaseMaturityStartTime{std::numeric_limits<int64_t>::max()};
+    /**
+     * Median-time-past at and after which the extended coinbase maturity rule
+     * is no longer enforced. The deployment always expires with RDTS, so the
+     * effective end is the earlier of this and RdtsExpiryTime; the default
+     * leaves the RDTS expiry as the only end. Setting it earlier allows a
+     * short first deployment that a later release can extend, which is the
+     * only direction that stays a soft fork.
+     */
+    int64_t ExtendedCoinbaseMaturityEndTime{std::numeric_limits<int64_t>::max()};
     /** Don't warn about unknown BIP 9 activations below this height.
      * This prevents us from warning about the CSV and segwit activations. */
     int MinBIP9WarningHeight;
@@ -218,7 +228,14 @@ struct Params {
      *  never active on a chain with no RDTS expiry. */
     bool ExtendedCoinbaseMaturityActiveAt(int64_t mtp_prev) const
     {
-        return mtp_prev >= ExtendedCoinbaseMaturityStartTime && mtp_prev < RdtsExpiryTime;
+        return mtp_prev >= ExtendedCoinbaseMaturityStartTime && mtp_prev < ExtendedCoinbaseMaturityExpiry();
+    }
+
+    /** The median-time-past the extended coinbase maturity rule stops at: it
+     *  expires with RDTS, or earlier if an end time is scheduled. */
+    int64_t ExtendedCoinbaseMaturityExpiry() const
+    {
+        return std::min(ExtendedCoinbaseMaturityEndTime, RdtsExpiryTime);
     }
 };
 

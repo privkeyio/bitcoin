@@ -100,11 +100,20 @@ void ReadRegTestArgs(const ArgsManager& args, CChainParams::RegTestOptions& opti
         if (!options.rdts_expiry_time) {
             throw std::runtime_error("-extendedcoinbasematurity requires -rdtsexpiry=<time> (the rule expires with RDTS).");
         }
-        int64_t start;
-        if (!ParseInt64(arg, &start) || start >= *options.rdts_expiry_time) {
-            throw std::runtime_error(strprintf("Invalid start (%s) for -extendedcoinbasematurity=<time>: must precede the RDTS expiry (%d).", arg, *options.rdts_expiry_time));
+        std::vector<std::string> fields{SplitString(arg, ':')};
+        int64_t start, end{*options.rdts_expiry_time};
+        if (fields.size() > 2 || !ParseInt64(fields[0], &start) ||
+            (fields.size() == 2 && !ParseInt64(fields[1], &end))) {
+            throw std::runtime_error(strprintf("Invalid format (%s) for -extendedcoinbasematurity=<start>[:<end>].", arg));
+        }
+        if (start >= *options.rdts_expiry_time) {
+            throw std::runtime_error(strprintf("Invalid start (%s) for -extendedcoinbasematurity=<start>[:<end>]: must precede the RDTS expiry (%d).", arg, *options.rdts_expiry_time));
+        }
+        if (end <= start || end > *options.rdts_expiry_time) {
+            throw std::runtime_error(strprintf("Invalid end (%s) for -extendedcoinbasematurity=<start>[:<end>]: must follow the start and not outlast the RDTS expiry (%d).", arg, *options.rdts_expiry_time));
         }
         options.extended_coinbase_maturity_start_time = start;
+        options.extended_coinbase_maturity_end_time = end;
     }
 
     if (const auto arg{args.GetArg("-blake2b_headline")}; arg) {

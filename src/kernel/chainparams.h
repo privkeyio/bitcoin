@@ -175,6 +175,7 @@ public:
         //! RDTS expiry (see -extendedcoinbasematurity). Requires
         //! rdts_expiry_time, which it must precede.
         std::optional<int64_t> extended_coinbase_maturity_start_time{};
+        std::optional<int64_t> extended_coinbase_maturity_end_time{};
         std::optional<std::vector<unsigned char>> blake2b_headline{};
     };
 
