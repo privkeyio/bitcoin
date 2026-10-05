@@ -677,6 +677,8 @@ private:
     bool MaybeSendGetHeaders(CNode& pfrom, const CBlockLocator& locator, Peer& peer, const uint256& hash_stop = {}) EXCLUSIVE_LOCKS_REQUIRED(g_msgproc_mutex);
     /** Highest block height we may share with this peer. */
     int PeerBlockSharingHeightLimit(const Peer& peer) const;
+    /** Whether we may sync headers from this peer (always, unless BLAKE2b is scheduled). */
+    bool CanSyncHeadersFrom(const Peer& peer) const;
     /** Potentially fetch blocks from this peer upon receipt of a new headers tip */
     void HeadersDirectFetchBlocks(CNode& pfrom, const Peer& peer, const CBlockIndex& last_header);
     /** Update peer state based on received headers message */
@@ -1119,6 +1121,11 @@ static bool CanServeHeaders(const Peer& peer)
 int PeerManagerImpl::PeerBlockSharingHeightLimit(const Peer& peer) const
 {
     return CanServeHeaders(peer) ? std::numeric_limits<int>::max() : m_chainparams.StalePeerCommonHeight();
+}
+
+bool PeerManagerImpl::CanSyncHeadersFrom(const Peer& peer) const
+{
+    return CanServeHeaders(peer) || m_chainparams.StalePeerCommonHeight() == std::numeric_limits<int>::max();
 }
 
 /** Whether this peer can only serve limited recent blocks (e.g. because
@@ -2711,7 +2718,7 @@ bool PeerManagerImpl::TryLowWorkHeadersSync(Peer& peer, CNode& pfrom, const CBlo
         // Only try to sync with this peer if their headers message was full;
         // otherwise they don't have more headers after this so no point in
         // trying to sync their too-little-work chain.
-        if (headers.size() == m_opts.max_headers_result && CanServeHeaders(peer)) {
+        if (headers.size() == m_opts.max_headers_result && CanSyncHeadersFrom(peer)) {
             // Note: we could advance to the last header in this set that is
             // known to us, rather than starting at the first header (which we
             // may already have); however this is unlikely to matter much since
@@ -2756,7 +2763,7 @@ bool PeerManagerImpl::IsAncestorOfBestHeaderOrTip(const CBlockIndex* header)
 
 bool PeerManagerImpl::MaybeSendGetHeaders(CNode& pfrom, const CBlockLocator& locator, Peer& peer, const uint256& hash_stop)
 {
-    if (!CanServeHeaders(peer) && hash_stop.IsNull()) return false;
+    if (!CanSyncHeadersFrom(peer) && hash_stop.IsNull()) return false;
 
     const auto current_time = NodeClock::now();
 
@@ -4053,7 +4060,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
             // our initial peer is unresponsive (but less bandwidth than we'd
             // use if we turned on sync with all peers).
             CNodeState& state{*Assert(State(pfrom.GetId()))};
-            if (CanServeHeaders(*peer) && (state.fSyncStarted || (!peer->m_inv_triggered_getheaders_before_sync && *best_block != m_last_block_inv_triggering_headers_sync))) {
+            if (CanSyncHeadersFrom(*peer) && (state.fSyncStarted || (!peer->m_inv_triggered_getheaders_before_sync && *best_block != m_last_block_inv_triggering_headers_sync))) {
                 if (MaybeSendGetHeaders(pfrom, GetLocator(m_chainman.m_best_header), *peer)) {
                     LogDebug(BCLog::NET, "getheaders (%d) %s to peer=%d\n",
                             m_chainman.m_best_header->nHeight, best_block->ToString(),
