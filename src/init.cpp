@@ -1166,7 +1166,8 @@ static void SyncCoinsTipAfterChainSync(const NodeContext& node)
     }
 
     LogDebug(BCLog::COINDB, "Finished syncing to tip, syncing chainstate to disk\n");
-    node.chainman->ActiveChainstate().CoinsTip().Sync();
+    BlockValidationState state;
+    node.chainman->ActiveChainstate().FlushStateToDisk(state, FlushStateMode::FORCE_SYNC);
 }
 
 bool AppInitInterfaces(NodeContext& node)
