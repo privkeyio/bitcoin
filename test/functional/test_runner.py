@@ -119,6 +119,7 @@ BASE_SCRIPTS = [
     'wallet_avoidreuse.py --legacy-wallet',
     'wallet_avoidreuse.py --descriptors',
     'feature_abortnode.py',
+    'feature_postibd_sync_crash.py',
     'wallet_address_types.py --legacy-wallet',
     'wallet_address_types.py --descriptors',
     'p2p_orphan_handling.py',
