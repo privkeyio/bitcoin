@@ -419,6 +419,7 @@ BASE_SCRIPTS = [
     'feature_anchors.py',
     'mempool_datacarrier.py',
     'mempool_datacarrier_verified_keys.py',
+    'mempool_datacarrier_verified_keys_packages.py',
     'feature_coinstatsindex.py',
     'wallet_orphanedreward.py',
     'wallet_timelock.py',
