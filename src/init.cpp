@@ -682,7 +682,7 @@ void SetupServerArgs(ArgsManager& argsman, bool can_listen_ipc)
     argsman.AddArg("-minrelaytxfee=<amt>", strprintf("Fees (in %s/kvB) smaller than this are considered zero fee for relaying, mining and transaction creation (default: %s)",
         CURRENCY_UNIT, FormatMoney(DEFAULT_MIN_RELAY_TX_FEE)), ArgsManager::ALLOW_ANY, OptionsCategory::NODE_RELAY);
     argsman.AddArg("-rejecttokens",
-                   strprintf("Refuse to relay or mine transactions involving non-bitcoin tokens (default: %u)",
+                   strprintf("Refuse to relay or mine transactions involving non-bitcoin tokens: Runes, Counterparty, OLGA, JSON token messages (the BRC-20 format) and Omni Layer (default: %u)",
                              DEFAULT_REJECT_TOKENS),
                    ArgsManager::ALLOW_ANY, OptionsCategory::NODE_RELAY);
     argsman.AddArg("-spkreuse=<policy>", strprintf("Either \"allow\" to relay/mine transactions reusing addresses or other pubkey scripts, or \"conflict\" to treat them as exclusive prior to being mined (default: %s)", DEFAULT_SPKREUSE), ArgsManager::ALLOW_ANY, OptionsCategory::NODE_RELAY);
