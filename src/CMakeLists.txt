@@ -53,6 +53,13 @@ string(STRIP "${SECP256K1_APPEND_LDFLAGS} ${APPEND_LDFLAGS}" SECP256K1_APPEND_LD
 set(SECP256K1_APPEND_LDFLAGS ${SECP256K1_APPEND_LDFLAGS} CACHE STRING "" FORCE)
 # We want to build libsecp256k1 with the most tested RelWithDebInfo configuration.
 enable_language(C)
+# check_pie_supported() is per-language, and the top-level call only covers CXX.
+# Without this, secp256k1's C test executables are compiled with -fPIE but
+# linked without -pie.
+if(CMAKE_POSITION_INDEPENDENT_CODE)
+  check_linker_supports_pie(configure_warnings C)
+  set(configure_warnings ${configure_warnings} PARENT_SCOPE)
+endif()
 foreach(config IN LISTS CMAKE_BUILD_TYPE CMAKE_CONFIGURATION_TYPES)
   if(config STREQUAL "")
     continue()
@@ -152,6 +159,7 @@ add_library(bitcoin_common STATIC EXCLUDE_FROM_ALL
   common/settings.cpp
   common/signmessage.cpp
   common/system.cpp
+  common/system_ram.cpp
   common/url.cpp
   compressor.cpp
   core_read.cpp
@@ -258,6 +266,7 @@ add_library(bitcoin_node STATIC EXCLUDE_FROM_ALL
   node/blockmanager_args.cpp
   node/blockstorage.cpp
   node/caches.cpp
+  node/dbcache.cpp
   node/chainstate.cpp
   node/chainstatemanager_args.cpp
   node/coin.cpp

@@ -20,13 +20,20 @@
 #include <script/solver.h>
 #include <serialize.h>
 #include <span.h>
+#include <uint256.h>
+#include <util/transaction_identifier.h>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
+#include <limits>
+#include <optional>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 unsigned int g_script_size_policy_limit{DEFAULT_SCRIPT_SIZE_POLICY_LIMIT};
+bool g_reject_dead_branches{DEFAULT_REJECT_DEAD_BRANCHES};
 
 CAmount GetDustThreshold(const CTxOut& txout, const CFeeRate& dustRelayFeeIn)
 {
@@ -109,6 +116,64 @@ bool IsStandard(const CScript& scriptPubKey, const std::optional<unsigned>& max_
     return true;
 }
 
+/** The magic every Counterparty message begins with. */
+static constexpr std::string_view CNTRPRTY{"CNTRPRTY"};
+
+/**
+ * The obfuscation keystream is keyed only by the txid, so it is the same for every output of a
+ * transaction. Computing it once keeps the cost of the check per transaction rather than per
+ * output, which matters because a transaction may carry thousands of OP_RETURN outputs.
+ */
+static std::array<unsigned char, CNTRPRTY.size()> CounterpartyKeystream(const Txid& txid)
+{
+    const uint256& id{txid.ToUint256()};
+    unsigned char key[uint256::size()];
+    std::reverse_copy(id.begin(), id.end(), key);
+
+    unsigned char S[256];
+    for (unsigned int i{0}; i < 256; ++i) S[i] = i;
+    for (unsigned int i{0}, j{0}; i < 256; ++i) {
+        j = (j + S[i] + key[i % sizeof(key)]) & 0xff;
+        std::swap(S[i], S[j]);
+    }
+
+    std::array<unsigned char, CNTRPRTY.size()> keystream;
+    for (unsigned int n{0}, i{0}, j{0}; n < keystream.size(); ++n) {
+        i = (i + 1) & 0xff;
+        j = (j + S[i]) & 0xff;
+        std::swap(S[i], S[j]);
+        keystream[n] = S[(S[i] + S[j]) & 0xff];
+    }
+    return keystream;
+}
+
+/**
+ * Counterparty stores its message in an OP_RETURN payload obfuscated with RC4, keyed by the first
+ * input's txid in RPC (reversed) byte order. It is an asset protocol, and its issuance is what
+ * anchors the Stamps overlay protocols to the chain whenever they encode the file into
+ * OP_RETURN-carrying outputs; the older bare multisig encoding carries no OP_RETURN and is
+ * already non-standard by default.
+ *
+ * Counterparty only parses an output shaped as OP_RETURN followed by exactly one push, so taking
+ * the payload positionally matches its own grammar. Prepending an opcode to dodge this check also
+ * stops Counterparty from reading the message, so it buys nothing.
+ */
+static bool IsCounterpartyMessage(const CScript& scriptPubKey, const std::array<unsigned char, CNTRPRTY.size()>& keystream)
+{
+    opcodetype opcode;
+    std::vector<unsigned char> data;
+    CScript::const_iterator pc{scriptPubKey.begin()};
+    // Skip the OP_RETURN, then take the payload push.
+    if (!scriptPubKey.GetOp(pc, opcode, data)) return false;
+    if (!scriptPubKey.GetOp(pc, opcode, data)) return false;
+    if (data.size() < CNTRPRTY.size()) return false;
+
+    for (size_t n{0}; n < CNTRPRTY.size(); ++n) {
+        if ((data[n] ^ keystream[n]) != CNTRPRTY[n]) return false;
+    }
+    return true;
+}
+
 static inline bool MaybeReject_(std::string& out_reason, const std::string& reason, const std::string& reason_prefix, const ignore_rejects_type& ignore_rejects) {
     if (ignore_rejects.count(reason_prefix + reason)) {
         return false;
@@ -167,6 +232,7 @@ bool IsStandardTx(const CTransaction& tx, const kernel::MemPoolOptions& opts, st
     unsigned int n_dust{0};
     unsigned int n_monetary{0};
     TxoutType whichType;
+    std::optional<std::array<unsigned char, CNTRPRTY.size()>> cntrprty_keystream;
     for (size_t i{tx.vout.size()}; i; ) {
         const CTxOut& txout = tx.vout[--i];
 
@@ -199,8 +265,16 @@ bool IsStandardTx(const CTransaction& tx, const kernel::MemPoolOptions& opts, st
         }
 
         if (whichType == TxoutType::NULL_DATA) {
-            if (txout.scriptPubKey.size() > 2 && txout.scriptPubKey[1] == OP_13 && opts.reject_tokens) {
-                MaybeReject("tokens-runes");
+            if (opts.reject_tokens) {
+                if (txout.scriptPubKey.size() > 2 && txout.scriptPubKey[1] == OP_13) {
+                    MaybeReject("tokens-runes");
+                }
+                if (!tx.vin.empty()) {
+                    if (!cntrprty_keystream) cntrprty_keystream = CounterpartyKeystream(tx.vin[0].prevout.hash);
+                    if (IsCounterpartyMessage(txout.scriptPubKey, *cntrprty_keystream)) {
+                        MaybeReject("tokens-counterparty");
+                    }
+                }
             }
             nDataOut++;
             continue;
@@ -241,7 +315,7 @@ bool IsStandardTx(const CTransaction& tx, const kernel::MemPoolOptions& opts, st
 /**
  * Check the total number of non-witness sigops across the whole transaction, as per BIP54.
  */
-static bool CheckSigopsBIP54(const CTransaction& tx, const CCoinsViewCache& inputs)
+static bool CheckSigopsBIP54(const CTransaction& tx, const CCoinsViewCache& inputs, const kernel::MemPoolOptions& opts)
 {
     Assert(!tx.IsCoinBase());
 
@@ -259,7 +333,7 @@ static bool CheckSigopsBIP54(const CTransaction& tx, const CCoinsViewCache& inpu
         sigops += txin.scriptSig.GetSigOpCount(/*fAccurate=*/true);
         sigops += prev_txo.scriptPubKey.GetSigOpCount(txin.scriptSig);
 
-        if (sigops > MAX_TX_LEGACY_SIGOPS) {
+        if (sigops > opts.maxtxlegacysigops) {
             return false;
         }
     }
@@ -287,13 +361,13 @@ static bool CheckSigopsBIP54(const CTransaction& tx, const CCoinsViewCache& inpu
  *
  * We also check the total number of non-witness sigops across the whole transaction, as per BIP54.
  */
-bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs, const std::string& reason_prefix, std::string& out_reason, const ignore_rejects_type& ignore_rejects)
+bool AreInputsStandard(const CTransaction& tx, const CCoinsViewCache& mapInputs, const kernel::MemPoolOptions& opts, const std::string& reason_prefix, std::string& out_reason, const ignore_rejects_type& ignore_rejects)
 {
     if (tx.IsCoinBase()) {
         return true; // Coinbases don't use vin normally
     }
 
-    if (!CheckSigopsBIP54(tx, mapInputs)) {
+    if (!CheckSigopsBIP54(tx, mapInputs, opts)) {
         MaybeReject("sigops-toomany-overall");
     }
 
@@ -560,6 +634,16 @@ std::pair<CScript, unsigned int> GetScriptForTransactionInput(CScript prevScript
     return std::make_pair(CScript(), 0);
 }
 
+/**
+ * Whether to look for dead branches in this input. A witness over the script size
+ * limit fails IsWitnessStandard right after, so following its constants would be
+ * work spent on a transaction that is rejected anyway.
+ */
+static bool FollowDeadBranches(const CTxIn& txin)
+{
+    return ::g_reject_dead_branches && GetSerializeSize(txin.scriptWitness.stack) <= g_script_size_policy_limit;
+}
+
 std::pair<size_t, size_t> DatacarrierBytes(const CTransaction& tx, const CCoinsViewCache& view)
 {
     std::pair<size_t, size_t> ret{0, 0};
@@ -567,7 +651,7 @@ std::pair<size_t, size_t> DatacarrierBytes(const CTransaction& tx, const CCoinsV
     for (const CTxIn& txin : tx.vin) {
         const CTxOut &utxo = view.AccessCoin(txin.prevout).out;
         auto[script, consensus_weight_per_byte] = GetScriptForTransactionInput(utxo.scriptPubKey, txin);
-        const auto dcb = script.DatacarrierBytes(0);
+        const auto dcb = script.DatacarrierBytes(0, &txin.scriptWitness, FollowDeadBranches(txin));
         ret.first += dcb.first;
         ret.second += dcb.second;
     }
@@ -583,7 +667,7 @@ std::pair<size_t, size_t> DatacarrierBytes(const CTransaction& tx, const CCoinsV
 
 int32_t CalculateExtraTxWeight(const CTransaction& tx, const CCoinsViewCache& view, const unsigned int weight_per_data_byte)
 {
-    int32_t mod_weight{0};
+    int64_t mod_weight{0};
 
     // Add in any extra weight for data bytes
     if (weight_per_data_byte > 1) {
@@ -591,18 +675,18 @@ int32_t CalculateExtraTxWeight(const CTransaction& tx, const CCoinsViewCache& vi
             const CTxOut &utxo = view.AccessCoin(txin.prevout).out;
             auto[script, consensus_weight_per_byte] = GetScriptForTransactionInput(utxo.scriptPubKey, txin);
             if (weight_per_data_byte > consensus_weight_per_byte) {
-                const auto dcb = script.DatacarrierBytes(0);
-                mod_weight += (dcb.first + dcb.second) * (weight_per_data_byte - consensus_weight_per_byte);
+                const auto dcb = script.DatacarrierBytes(0, &txin.scriptWitness, FollowDeadBranches(txin));
+                mod_weight += int64_t(dcb.first + dcb.second) * (weight_per_data_byte - consensus_weight_per_byte);
             }
         }
         if (weight_per_data_byte > WITNESS_SCALE_FACTOR) {
             for (size_t i{tx.vout.size()}; i; ) {
                 const CTxOut& txout = tx.vout[--i];
                 const auto dcb = txout.scriptPubKey.DatacarrierBytes(tx.vout.size() - i);
-                mod_weight += (dcb.first + dcb.second) * (weight_per_data_byte - WITNESS_SCALE_FACTOR);
+                mod_weight += int64_t(dcb.first + dcb.second) * (weight_per_data_byte - WITNESS_SCALE_FACTOR);
             }
         }
     }
 
-    return mod_weight;
+    return int32_t(std::min(mod_weight, int64_t{std::numeric_limits<int32_t>::max()}));
 }

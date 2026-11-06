@@ -171,7 +171,7 @@ class NetTest(BitcoinTestFramework):
                 "lastsend": 0 if not self.options.v2transport else no_version_peer_conntime,
                 "minfeefilter": Decimal("0E-8"),
                 "network": "not_publicly_routable",
-                "permissions": [],
+                "permissions": ['bloomfilter'],
                 "forced_inbound": False,
                 "presynced_headers": -1,
                 "relaytxes": False,
@@ -185,6 +185,7 @@ class NetTest(BitcoinTestFramework):
                 "timeoffset": 0,
                 "transport_protocol_type": "v1" if not self.options.v2transport else "v2",
                 "version": 0,
+                "misbehavior_score": 0,
             },
         )
         no_version_peer.peer_disconnect()

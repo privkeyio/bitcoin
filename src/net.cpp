@@ -29,6 +29,7 @@
 #include <random.h>
 #include <scheduler.h>
 #include <util/fs.h>
+#include <util/overflow.h>
 #include <util/sock.h>
 #include <util/strencodings.h>
 #include <util/thread.h>
@@ -211,7 +212,7 @@ static std::vector<CAddress> ConvertSeeds(const std::vector<uint8_t> &vSeedsIn)
     while (!s.eof()) {
         CService endpoint;
         s >> endpoint;
-        CAddress addr{endpoint, SeedsServiceFlags()};
+        CAddress addr{endpoint, SeedsAssumedServiceFlags()};
         addr.nTime = rng.rand_uniform_delay(Now<NodeSeconds>() - one_week, -one_week);
         LogDebug(BCLog::NET, "Added hardcoded seed: %s\n", addr.ToStringAddrPort());
         vSeedsOut.push_back(addr);
@@ -228,7 +229,7 @@ CService GetLocalAddress(const CNode& peer)
     return GetLocal(peer).value_or(CService{CNetAddr(), GetListenPort()});
 }
 
-int GetnScore(const CService& addr)
+static int GetnScore(const CService& addr)
 {
     LOCK(g_maplocalhost_mutex);
     const auto it = mapLocalHost.find(addr);
@@ -297,7 +298,7 @@ bool AddLocal(const CService& addr_, int nScore)
         fAlready = !is_newly_added;
         LocalServiceInfo &info = it->second;
         if (is_newly_added || nScore >= info.nScore) {
-            info.nScore = nScore + (is_newly_added ? 0 : 1);
+            info.nScore = SaturatingAdd(nScore, is_newly_added ? 0 : 1);
             info.nPort = addr.GetPort();
         }
     }
@@ -330,9 +331,7 @@ bool SeenLocal(const CService& addr)
     LOCK(g_maplocalhost_mutex);
     const auto it = mapLocalHost.find(addr);
     if (it == mapLocalHost.end()) return false;
-    if (it->second.nScore < std::numeric_limits<int>::max()) {
-        ++it->second.nScore;
-    }
+    it->second.nScore = SaturatingAdd(it->second.nScore, 1);
     return true;
 }
 
@@ -475,7 +474,10 @@ CNode* CConnman::ConnectNode(CAddress addrConnect, const char *pszDest, bool fCo
     std::unique_ptr<i2p::sam::Session> i2p_transient_session;
 
     for (auto& target_addr: connect_to) {
-        if (DisableV1OnClearnet(target_addr.GetNetClass()) && !use_v2transport) {
+        const std::string_view dest_name{pszDest ? pszDest : ""};
+        if (RequiresV2Dest(target_addr, dest_name) && !use_v2transport) {
+            LogDebug(BCLog::NET, "skipping v1 connection to %s (-v2onlyclearnet)\n",
+                     target_addr.IsValid() ? target_addr.ToStringAddrPort() : std::string{dest_name});
             continue;
         }
         if (target_addr.IsValid()) {
@@ -609,6 +611,7 @@ void CConnman::AddWhitelistPermissionFlags(NetPermissionFlags& flags, std::optio
         if (whitelist_relay) NetPermissions::AddFlag(flags, NetPermissionFlags::Relay);
         NetPermissions::AddFlag(flags, NetPermissionFlags::Mempool);
         NetPermissions::AddFlag(flags, NetPermissionFlags::NoBan);
+        NetPermissions::AddFlag(flags, NetPermissionFlags::Addr);
     }
 }
 
@@ -1997,14 +2000,18 @@ void CConnman::DisconnectNodes()
                 // Add to reconnection list if appropriate. We don't reconnect right here, because
                 // the creation of a connection is a blocking operation (up to several seconds),
                 // and we don't want to hold up the socket handler thread for that long.
-                if (network_active && pnode->m_transport->ShouldReconnectV1() && !DisableV1OnClearnet(pnode->addr.GetNetClass())) {
-                    reconnections_to_add.push_back({
-                        .addr_connect = pnode->addr,
-                        .grant = std::move(pnode->grantOutbound),
-                        .destination = pnode->m_dest,
-                        .conn_type = pnode->m_conn_type,
-                        .use_v2transport = false});
-                    LogDebug(BCLog::NET, "retrying with v1 transport protocol for peer=%d\n", pnode->GetId());
+                if (network_active && pnode->m_transport->ShouldReconnectV1()) {
+                    if (RequiresV2Dest(pnode->addr, pnode->m_dest)) {
+                        LogDebug(BCLog::NET, "not retrying with v1 transport protocol for peer=%d (-v2onlyclearnet)\n", pnode->GetId());
+                    } else {
+                        reconnections_to_add.push_back({
+                            .addr_connect = pnode->addr,
+                            .grant = std::move(pnode->grantOutbound),
+                            .destination = pnode->m_dest,
+                            .conn_type = pnode->m_conn_type,
+                            .use_v2transport = false});
+                        LogDebug(BCLog::NET, "retrying with v1 transport protocol for peer=%d\n", pnode->GetId());
+                    }
                 }
 
                 // release outbound grant (if any)
@@ -2427,7 +2434,7 @@ void CConnman::ThreadDNSAddressSeed()
                 const auto addresses{LookupHost(host, nMaxIPs, true)};
                 if (!addresses.empty()) {
                     for (const CNetAddr& ip : addresses) {
-                        CAddress addr = CAddress(CService(ip, m_params.GetDefaultPort()), requiredServiceBits);
+                        CAddress addr = CAddress(CService(ip, m_params.GetDefaultPort()), SeedsAssumedServiceFlags());
                         addr.nTime = rng.rand_uniform_delay(Now<NodeSeconds>() - 3 * 24h, -4 * 24h); // use a random age between 3 and 7 days old
                         vAdd.push_back(addr);
                         found++;
@@ -2629,9 +2636,17 @@ bool CConnman::MultipleManualOrFullOutboundConns(Network net) const
     return m_network_conn_counts[net] > 1;
 }
 
-bool CConnman::DisableV1OnClearnet(Network net) const
+bool CConnman::RequiresV2Peer(Network net) const
 {
-    return disable_v1conn_clearnet && (net == NET_IPV4 || net == NET_IPV6);
+    return m_v2only_clearnet && IsClearnet(net);
+}
+
+bool CConnman::RequiresV2Dest(const CNetAddr& addr, std::string_view dest_name) const
+{
+    // A name proxy resolves the destination for us, so we can't tell locally which
+    // network it belongs to. Assume clearnet, the worst case.
+    if (!addr.IsValid() && !dest_name.empty()) return m_v2only_clearnet;
+    return RequiresV2Peer(addr.GetNetClass());
 }
 
 bool CConnman::MaybePickPreferredNetwork(std::optional<Network>& network)

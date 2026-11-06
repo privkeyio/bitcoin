@@ -799,6 +799,8 @@ BOOST_AUTO_TEST_CASE(test_IsStandard)
     CKey key = GenerateRandomKey();
     t.vout[0].scriptPubKey = GetScriptForDestination(PKHash(key.GetPubKey()));
 
+    g_mempool_opts.permit_bare_pubkey = true;
+
     constexpr auto CheckIsStandard = [](const auto& t) {
         std::string reason;
         BOOST_CHECK(IsStandardTx(CTransaction{t}, g_mempool_opts, reason));
@@ -866,6 +868,7 @@ BOOST_AUTO_TEST_CASE(test_IsStandard)
 
     // Test rejectparasites
     t.vout[0].scriptPubKey = CScript() << OP_RETURN;
+    t.vout.emplace_back(674, GetScriptForDestination(PKHash(key.GetPubKey())));
     t.nLockTime = 21;
     g_mempool_opts.reject_parasites = false;
     CheckIsStandard(t);
@@ -884,6 +887,32 @@ BOOST_AUTO_TEST_CASE(test_IsStandard)
     // At least one data push is needed after OP_13 to match
     t.vout[0].scriptPubKey = CScript() << OP_RETURN << OP_13;
     CheckIsStandard(t);
+
+    // Test rejecttokens catching a Counterparty issuance, an asset protocol whose issuance is
+    // what anchors the Stamps overlay protocols. Payload and input txid are from mainnet
+    // transaction 92df895bbf715316fee36cb536453fcd509dc80569afee6dce9e8203ad51de15.
+    const Txid dummy_txid{t.vin[0].prevout.hash};
+    const Txid cntrprty_txid{*Txid::FromHex("e915fa8be0a5d25c4327d056a54bbed7051f6ecf850993994741645012bb0e6b")};
+    t.vout[0].scriptPubKey = CScript() << OP_RETURN << "dfa3af7889188ce8034d69efcf5a63a82d6290bbbc54572b93657db6f7d83d"_hex;
+    t.vin[0].prevout.hash = cntrprty_txid;
+    CheckIsNotStandard(t, "tokens-counterparty");
+    // The payload is obfuscated with the first input's txid, so it only decodes against that input
+    t.vin[0].prevout.hash = dummy_txid;
+    CheckIsStandard(t);
+    // A payload too short to hold the magic is not a Counterparty message
+    t.vin[0].prevout.hash = cntrprty_txid;
+    t.vout[0].scriptPubKey = CScript() << OP_RETURN << "dfa3af7889188c"_hex;
+    CheckIsStandard(t);
+    // Every datacarrier output is checked, not just the one the keystream is derived on
+    t.vout[0].scriptPubKey = CScript() << OP_RETURN << "dfa3af7889188ce8034d69efcf5a63a82d6290bbbc54572b93657db6f7d83d"_hex;
+    t.vout.emplace_back(0, CScript() << OP_RETURN << "dfa3af7889188c"_hex);
+    CheckIsNotStandard(t, "tokens-counterparty");
+    t.vout.pop_back();
+    g_mempool_opts.reject_tokens = false;
+    CheckIsStandard(t);
+    g_mempool_opts.reject_tokens = true;
+    t.vin[0].prevout.hash = dummy_txid;
+
     // Test rejecttokens applying to OLGA
     const auto olga_header = CScript() << OP_0 << "003e7374616d703a000000000000000000000000000000000000000000000000"_hex;
     t.vout[0].scriptPubKey = olga_header;
@@ -900,12 +929,15 @@ BOOST_AUTO_TEST_CASE(test_IsStandard)
 
     // MAX_OP_RETURN_RELAY-byte TxoutType::NULL_DATA (standard)
     g_mempool_opts.permitbaredatacarrier = true;
-    t.vout[0].scriptPubKey = CScript() << OP_RETURN << "04678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef3804678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef38"_hex;
+    t.vout[0].scriptPubKey = CScript() << OP_RETURN;
+    while (t.vout[0].scriptPubKey.size() < MAX_OP_RETURN_RELAY) {
+        t.vout[0].scriptPubKey << OP_0;
+    }
     BOOST_CHECK_EQUAL(MAX_OP_RETURN_RELAY, t.vout[0].scriptPubKey.size());
     CheckIsStandard(t);
 
     // MAX_OP_RETURN_RELAY+1-byte TxoutType::NULL_DATA (non-standard)
-    t.vout[0].scriptPubKey = CScript() << OP_RETURN << "04678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef3804678afdb0fe5548271967f1a67130b7105cd6a828e03909a67962e0ea1f61deb649f6bc3f4cef3800"_hex;
+    t.vout[0].scriptPubKey << OP_0;
     BOOST_CHECK_EQUAL(MAX_OP_RETURN_RELAY + 1, t.vout[0].scriptPubKey.size());
     CheckIsNotStandard(t, "scriptpubkey");
 
@@ -1025,7 +1057,7 @@ BOOST_AUTO_TEST_CASE(test_IsStandard)
 
     g_mempool_opts.permit_bare_multisig = false;
     CheckIsNotStandard(t, "bare-multisig");
-    g_mempool_opts.permit_bare_multisig = DEFAULT_PERMIT_BAREMULTISIG;
+    g_mempool_opts.permit_bare_multisig = true;
 
     // Add dust outputs up to allowed maximum
     assert(t.vout.size() == 1);
@@ -1139,6 +1171,10 @@ BOOST_AUTO_TEST_CASE(max_standard_legacy_sigops)
     CKey key;
     key.MakeNewKey(true);
 
+    const kernel::MemPoolOptions mempool_opts{
+        .maxtxlegacysigops = 2'500,
+    };
+
     // Create a pathological P2SH script padded with as many sigops as is standard.
     CScript max_sigops_redeem_script{CScript() << std::vector<unsigned char>{} << key.GetPubKey()};
     for (unsigned i{0}; i < MAX_P2SH_SIGOPS - 1; ++i) max_sigops_redeem_script << OP_2DUP << OP_CHECKSIG << OP_DROP;
@@ -1148,7 +1184,7 @@ BOOST_AUTO_TEST_CASE(max_standard_legacy_sigops)
     // Create a transaction fanning out as many such P2SH outputs as is standard to spend in a
     // single transaction, and a transaction spending them.
     CMutableTransaction tx_create, tx_max_sigops;
-    const unsigned p2sh_inputs_count{MAX_TX_LEGACY_SIGOPS / MAX_P2SH_SIGOPS};
+    const unsigned p2sh_inputs_count{mempool_opts.maxtxlegacysigops / MAX_P2SH_SIGOPS};
     tx_create.vout.reserve(p2sh_inputs_count);
     for (unsigned i{0}; i < p2sh_inputs_count; ++i) {
         tx_create.vout.emplace_back(424242 + i, max_sigops_p2sh);
@@ -1160,12 +1196,12 @@ BOOST_AUTO_TEST_CASE(max_standard_legacy_sigops)
     }
 
     // p2sh_inputs_count is truncated to 166 (from 166.6666..)
-    BOOST_CHECK_LT(p2sh_inputs_count * MAX_P2SH_SIGOPS, MAX_TX_LEGACY_SIGOPS);
+    BOOST_CHECK_LE(p2sh_inputs_count * MAX_P2SH_SIGOPS, mempool_opts.maxtxlegacysigops);
     AddCoins(coins, CTransaction(tx_create), 0, false);
 
     // 2490 sigops is below the limit.
-    BOOST_CHECK_EQUAL(GetP2SHSigOpCount(CTransaction(tx_max_sigops), coins), 2490);
-    BOOST_CHECK(::AreInputsStandard(CTransaction(tx_max_sigops), coins));
+    BOOST_CHECK_EQUAL(GetP2SHSigOpCount(CTransaction(tx_max_sigops), coins), p2sh_inputs_count * MAX_P2SH_SIGOPS);
+    BOOST_CHECK(::AreInputsStandard(CTransaction(tx_max_sigops), coins, mempool_opts));
 
     // Adding one more input will bump this to 2505, hitting the limit.
     tx_create.vout.emplace_back(424242, max_sigops_p2sh);
@@ -1175,9 +1211,9 @@ BOOST_AUTO_TEST_CASE(max_standard_legacy_sigops)
     }
     tx_max_sigops.vin.emplace_back(prev_txid, p2sh_inputs_count, CScript() << ToByteVector(max_sigops_redeem_script));
     AddCoins(coins, CTransaction(tx_create), 0, false);
-    BOOST_CHECK_GT((p2sh_inputs_count + 1) * MAX_P2SH_SIGOPS, MAX_TX_LEGACY_SIGOPS);
-    BOOST_CHECK_EQUAL(GetP2SHSigOpCount(CTransaction(tx_max_sigops), coins), 2505);
-    BOOST_CHECK(!::AreInputsStandard(CTransaction(tx_max_sigops), coins));
+    BOOST_CHECK_GT((p2sh_inputs_count + 1) * MAX_P2SH_SIGOPS, mempool_opts.maxtxlegacysigops);
+    BOOST_CHECK_EQUAL(GetP2SHSigOpCount(CTransaction(tx_max_sigops), coins), (p2sh_inputs_count + 1) * MAX_P2SH_SIGOPS);
+    BOOST_CHECK(!::AreInputsStandard(CTransaction(tx_max_sigops), coins, mempool_opts));
 
     // Now, check the limit can be reached with regular P2PK outputs too. Use a separate
     // preparation transaction, to demonstrate spending coins from a single tx is irrelevant.
@@ -1195,8 +1231,8 @@ BOOST_AUTO_TEST_CASE(max_standard_legacy_sigops)
     AddCoins(coins, CTransaction(tx_create_p2pk), 0, false);
 
     // The transaction now contains exactly 2500 sigops, the check should pass.
-    BOOST_CHECK_EQUAL(p2sh_inputs_count * MAX_P2SH_SIGOPS + p2pk_inputs_count * 1, MAX_TX_LEGACY_SIGOPS);
-    BOOST_CHECK(::AreInputsStandard(CTransaction(tx_max_sigops), coins));
+    BOOST_CHECK_EQUAL(p2sh_inputs_count * MAX_P2SH_SIGOPS + p2pk_inputs_count * 1, mempool_opts.maxtxlegacysigops);
+    BOOST_CHECK(::AreInputsStandard(CTransaction(tx_max_sigops), coins, mempool_opts));
 
     // Now, add some Segwit inputs. We add one for each defined Segwit output type. The limit
     // is exclusively on non-witness sigops and therefore those should not be counted.
@@ -1212,7 +1248,7 @@ BOOST_AUTO_TEST_CASE(max_standard_legacy_sigops)
 
     // The transaction now still contains exactly 2500 sigops, the check should pass.
     AddCoins(coins, CTransaction(tx_create_segwit), 0, false);
-    BOOST_REQUIRE(::AreInputsStandard(CTransaction(tx_max_sigops), coins));
+    BOOST_REQUIRE(::AreInputsStandard(CTransaction(tx_max_sigops), coins, mempool_opts));
 
     // Add one more P2PK input. We'll reach the limit.
     tx_create_p2pk.vout.emplace_back(212121, p2pk_script);
@@ -1223,8 +1259,8 @@ BOOST_AUTO_TEST_CASE(max_standard_legacy_sigops)
         tx_max_sigops.vin.emplace_back(prev_txid, i);
     }
     AddCoins(coins, CTransaction(tx_create_p2pk), 0, false);
-    BOOST_CHECK_GT(p2sh_inputs_count * MAX_P2SH_SIGOPS + p2pk_inputs_count * 1, MAX_TX_LEGACY_SIGOPS);
-    BOOST_CHECK(!::AreInputsStandard(CTransaction(tx_max_sigops), coins));
+    BOOST_CHECK_GT(p2sh_inputs_count * MAX_P2SH_SIGOPS + p2pk_inputs_count * 1, mempool_opts.maxtxlegacysigops);
+    BOOST_CHECK(!::AreInputsStandard(CTransaction(tx_max_sigops), coins, mempool_opts));
 }
 
 /** Sanity check the return value of SpendsNonAnchorWitnessProg for various output types. */

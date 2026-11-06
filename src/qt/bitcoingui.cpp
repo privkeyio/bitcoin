@@ -35,8 +35,7 @@
 #include <qt/macdockiconhandler.h>
 #endif
 #ifdef BITCOIN_QT_WIN_TASKBAR
-#include <QWinTaskbarButton>
-#include <QWinTaskbarProgress>
+#include <qt/wintaskbarprogress.h>
 #endif
 
 #include <chain.h>
@@ -197,6 +196,7 @@ BitcoinGUI::BitcoinGUI(interfaces::Node& node, const PlatformStyle *_platformSty
     progressBarLabel->setVisible(false);
     progressBar = new GUIUtil::ProgressBar();
     progressBar->setAlignment(Qt::AlignCenter);
+    progressBar->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
     progressBar->setVisible(false);
 
     // Override style sheet for progress bar for styles that have a segmented progress bar,
@@ -209,7 +209,7 @@ BitcoinGUI::BitcoinGUI(interfaces::Node& node, const PlatformStyle *_platformSty
     }
 
     statusBar()->addWidget(progressBarLabel);
-    statusBar()->addWidget(progressBar);
+    statusBar()->addWidget(progressBar, 1);
     statusBar()->addPermanentWidget(frameBlocks);
 
     // Install event filter to be able to catch status tip events (QEvent::StatusTip)
@@ -232,7 +232,8 @@ BitcoinGUI::BitcoinGUI(interfaces::Node& node, const PlatformStyle *_platformSty
     m_app_nap_inhibitor = new CAppNapInhibitor;
 #endif
 #ifdef BITCOIN_QT_WIN_TASKBAR
-    m_taskbar_button = new QWinTaskbarButton(this);
+    m_taskbar_progress = new WinTaskbarProgress(this);
+    QApplication::instance()->installNativeEventFilter(m_taskbar_progress);
 #endif
 
     GUIUtil::handleCloseWindowShortcut(this);
@@ -250,6 +251,9 @@ BitcoinGUI::~BitcoinGUI()
 #ifdef Q_OS_MACOS
     delete m_app_nap_inhibitor;
     MacDockIconHandler::cleanup();
+#endif
+#ifdef BITCOIN_QT_WIN_TASKBAR
+    QApplication::instance()->removeNativeEventFilter(m_taskbar_progress);
 #endif
 
     delete NetWatch;
@@ -338,6 +342,8 @@ void BitcoinGUI::createActions()
     signMessageAction->setStatusTip(tr("Sign messages with your Bitcoin addresses to prove you own them"));
     verifyMessageAction = new QAction(tr("&Verify message…"), this);
     verifyMessageAction->setStatusTip(tr("Verify messages to ensure they were signed with specified Bitcoin addresses"));
+    sweepPrivKeyAction = new QAction(tr("&Sweep private key…"), this);
+    sweepPrivKeyAction->setStatusTip(tr("Sweep coins from a private key into this wallet"));
     m_load_psbt_action = new QAction(tr("&Load PSBT from file…"), this);
     m_load_psbt_action->setStatusTip(tr("Load Partially Signed Bitcoin Transaction"));
     m_load_psbt_clipboard_action = new QAction(tr("Load PSBT from &clipboard…"), this);
@@ -424,6 +430,8 @@ void BitcoinGUI::createActions()
         connect(m_load_psbt_clipboard_action, &QAction::triggered, [this]{ gotoLoadPSBT(true); });
         connect(verifyMessageAction, &QAction::triggered, [this]{ showNormalIfMinimized(); });
         connect(verifyMessageAction, &QAction::triggered, [this]{ gotoVerifyMessageTab(); });
+        connect(sweepPrivKeyAction, &QAction::triggered, [this]{ showNormalIfMinimized(); });
+        connect(sweepPrivKeyAction, &QAction::triggered, [this]{ gotoSweepPrivKeyDialog(); });
         connect(usedSendingAddressesAction, &QAction::triggered, walletFrame, &WalletFrame::usedSendingAddresses);
         connect(usedReceivingAddressesAction, &QAction::triggered, walletFrame, &WalletFrame::usedReceivingAddresses);
         connect(openAction, &QAction::triggered, this, &BitcoinGUI::openClicked);
@@ -446,7 +454,6 @@ void BitcoinGUI::createActions()
                 connect(action, &QAction::triggered, [this, path] {
                     auto activity = new OpenWalletActivity(m_wallet_controller, this);
                     connect(activity, &OpenWalletActivity::opened, this, &BitcoinGUI::setCurrentWallet, Qt::QueuedConnection);
-                    connect(activity, &OpenWalletActivity::opened, rpcConsole, &RPCConsole::setCurrentWallet, Qt::QueuedConnection);
                     activity->open(path);
                 });
             }
@@ -480,7 +487,6 @@ void BitcoinGUI::createActions()
 
             auto activity = new RestoreWalletActivity(m_wallet_controller, this);
             connect(activity, &RestoreWalletActivity::restored, this, &BitcoinGUI::setCurrentWallet, Qt::QueuedConnection);
-            connect(activity, &RestoreWalletActivity::restored, rpcConsole, &RPCConsole::setCurrentWallet, Qt::QueuedConnection);
 
             auto backup_file_path = fs::PathFromString(backup_file.toStdString());
             activity->restore(backup_file_path, wallet_name.toStdString());
@@ -547,6 +553,7 @@ void BitcoinGUI::createMenuBar()
         file->addAction(openAction);
         file->addAction(signMessageAction);
         file->addAction(verifyMessageAction);
+        file->addAction(sweepPrivKeyAction);
         file->addAction(m_load_psbt_action);
         file->addAction(m_load_psbt_clipboard_action);
         file->addSeparator();
@@ -878,6 +885,7 @@ void BitcoinGUI::setWalletActionsEnabled(bool enabled)
     changePassphraseAction->setEnabled(enabled);
     signMessageAction->setEnabled(enabled);
     verifyMessageAction->setEnabled(enabled);
+    sweepPrivKeyAction->setEnabled(enabled);
     usedSendingAddressesAction->setEnabled(enabled);
     usedReceivingAddressesAction->setEnabled(enabled);
     openAction->setEnabled(enabled);
@@ -1085,6 +1093,12 @@ void BitcoinGUI::gotoVerifyMessageTab(QString addr)
 {
     if (walletFrame) walletFrame->gotoVerifyMessageTab(addr);
 }
+
+void BitcoinGUI::gotoSweepPrivKeyDialog()
+{
+    if (walletFrame) walletFrame->gotoSweepPrivKeyDialog();
+}
+
 void BitcoinGUI::gotoLoadPSBT(bool from_clipboard)
 {
     if (walletFrame) walletFrame->gotoLoadPSBT(from_clipboard);
@@ -1239,11 +1253,6 @@ void BitcoinGUI::setNumBlocks(int count, const QDateTime& blockDate, double nVer
 
     tooltip = tr("Processed %n block(s) of transaction history.", "", count);
 
-#ifdef BITCOIN_QT_WIN_TASKBAR
-    m_taskbar_button->setWindow(windowHandle());
-    QWinTaskbarProgress* taskbar_progress = m_taskbar_button->progress();
-#endif
-
     // Set icon state: spinning if catching up, tick otherwise
     if (secs < MAX_BLOCK_TIME_GAP) {
         tooltip = tr("Up to date") + QString(".<br>") + tooltip;
@@ -1260,7 +1269,7 @@ void BitcoinGUI::setNumBlocks(int count, const QDateTime& blockDate, double nVer
         progressBarLabel->setVisible(false);
         progressBar->setVisible(false);
 #ifdef BITCOIN_QT_WIN_TASKBAR
-        taskbar_progress->setVisible(false);
+        m_taskbar_progress->setVisible(false);
 #endif
     }
     else
@@ -1277,8 +1286,9 @@ void BitcoinGUI::setNumBlocks(int count, const QDateTime& blockDate, double nVer
         progressBar->setValue(nVerificationProgress * 1000000000.0 + 0.5);
         progressBar->setVisible(true);
 #ifdef BITCOIN_QT_WIN_TASKBAR
-        taskbar_progress->setValue(qRound(nVerificationProgress * 100.0));
-        taskbar_progress->setVisible(true);
+        m_taskbar_progress->setWindow(this);
+        m_taskbar_progress->setValue(qRound(nVerificationProgress * 100.0));
+        m_taskbar_progress->setVisible(true);
 #endif
 
         tooltip = tr("Catching up…") + QString("<br>") + tooltip;
@@ -1316,14 +1326,8 @@ void BitcoinGUI::setNumBlocks(int count, const QDateTime& blockDate, double nVer
 void BitcoinGUI::createWallet()
 {
 #ifdef ENABLE_WALLET
-#ifndef USE_SQLITE
-    // Compiled without sqlite support (required for descriptor wallets)
-    message(tr("Error creating wallet"), tr("Cannot create new wallet, the software was compiled without sqlite support (required for descriptor wallets)"), CClientUIInterface::MSG_ERROR);
-    return;
-#endif // USE_SQLITE
     auto activity = new CreateWalletActivity(getWalletController(), this);
     connect(activity, &CreateWalletActivity::created, this, &BitcoinGUI::setCurrentWallet);
-    connect(activity, &CreateWalletActivity::created, rpcConsole, &RPCConsole::setCurrentWallet);
     activity->create();
 #endif // ENABLE_WALLET
 }

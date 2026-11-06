@@ -33,11 +33,11 @@ static constexpr int DEFAULT_MINRELAYMATURITY{0};
 /** Default for -mempoolreplacement; must update docs in init.cpp manually */
 static constexpr RBFPolicy DEFAULT_MEMPOOL_RBF_POLICY{RBFPolicy::Always};
 /** Default for -mempooltruc; must update docs in init.cpp manually */
-static constexpr TRUCPolicy DEFAULT_MEMPOOL_TRUC_POLICY{TRUCPolicy::Enforce};
+static constexpr TRUCPolicy DEFAULT_MEMPOOL_TRUC_POLICY{TRUCPolicy::Accept};
 /** Whether to fall back to legacy V1 serialization when writing mempool.dat */
 static constexpr bool DEFAULT_PERSIST_V1_DAT{false};
 /** Default for -acceptnonstddatacarrier */
-static constexpr bool DEFAULT_ACCEPT_NON_STD_DATACARRIER{true};
+static constexpr bool DEFAULT_ACCEPT_NON_STD_DATACARRIER{false};
 /** Default for -acceptnonstdtxn */
 static constexpr bool DEFAULT_ACCEPT_NON_STD_TXN{false};
 /** Default for -acceptunknownwitness */
@@ -70,6 +70,7 @@ struct MemPoolOptions {
     int32_t dust_relay_target{0};
     /** Multiplier for dustdynamic assignments, in thousandths. */
     int dust_relay_multiplier{DEFAULT_DUST_RELAY_MULTIPLIER};
+    unsigned int maxtxlegacysigops{MAX_TX_LEGACY_SIGOPS};
     /**
      * A data carrying output is an unspendable output containing data. The script
      * type is designated as TxoutType::NULL_DATA.
@@ -85,6 +86,7 @@ struct MemPoolOptions {
     bool permit_bare_multisig{DEFAULT_PERMIT_BAREMULTISIG};
     bool reject_parasites{DEFAULT_REJECT_PARASITES};
     bool reject_tokens{DEFAULT_REJECT_TOKENS};
+    bool subdustfeepenalty{DEFAULT_SUBDUSTFEEPENALTY};
     bool accept_non_std_datacarrier{DEFAULT_ACCEPT_NON_STD_DATACARRIER};
     bool require_standard{true};
     bool acceptunknownwitness{DEFAULT_ACCEPTUNKNOWNWITNESS};

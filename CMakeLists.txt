@@ -28,7 +28,7 @@ get_directory_property(precious_variables CACHE_VARIABLES)
 #=============================
 set(CLIENT_NAME "Bitcoin Core")
 set(CLIENT_VERSION_MAJOR 29)
-set(CLIENT_VERSION_MINOR 3)
+set(CLIENT_VERSION_MINOR 4)
 set(CLIENT_VERSION_BUILD 0)
 set(CLIENT_VERSION_RC 0)
 set(CLIENT_VERSION_IS_RELEASE "true")
@@ -163,8 +163,12 @@ if(WITH_SQLITE)
   if(VCPKG_TARGET_TRIPLET)
     # Use of the `unofficial::` namespace is a vcpkg package manager convention.
     find_package(unofficial-sqlite3 CONFIG REQUIRED)
+    add_library(SQLite3::SQLite3 ALIAS unofficial::sqlite3::sqlite3)
   else()
     find_package(SQLite3 3.7.17 REQUIRED)
+    if(NOT TARGET SQLite3::SQLite3) # CMake < 4.3
+      add_library(SQLite3::SQLite3 ALIAS SQLite::SQLite3)
+    endif()
   endif()
   set(USE_SQLITE ON)
 endif()
@@ -239,7 +243,6 @@ if(BUILD_GUI)
     set(USE_DBUS TRUE)
   endif()
   if(WITH_TASKBAR_PROGRESS)
-    list(APPEND qt_components WinExtras)
     set(BITCOIN_QT_WIN_TASKBAR TRUE)
   endif()
   if(BUILD_GUI_TESTS)
@@ -276,7 +279,7 @@ string(APPEND CMAKE_CXX_LINK_EXECUTABLE " ${APPEND_LDFLAGS}")
 set(configure_warnings)
 
 include(CheckLinkerSupportsPIE)
-check_linker_supports_pie(configure_warnings)
+check_linker_supports_pie(configure_warnings CXX)
 
 # The core_interface library aims to encapsulate common build flags.
 # It is a usage requirement for all targets except for secp256k1, which
@@ -322,7 +325,10 @@ add_library(external_lib_interface INTERFACE)
 include(TryAppendCXXFlags)
 include(TryAppendLinkerFlag)
 
+# Sanitizers require leaving undefined symbols in the library
+if(NOT SANITIZERS)
 try_append_linker_flag("-Wl,--no-undefined" TARGET external_lib_interface)
+endif()
 
 # Redefine/adjust per-configuration flags.
 target_compile_definitions(core_interface_debug INTERFACE

@@ -1,6 +1,6 @@
-Bitcoin Core version 29.3 is now available from:
+Bitcoin Core version 29.4 is now available from:
 
-  <https://bitcoincore.org/bin/bitcoin-core-29.3/>
+  <https://bitcoincore.org/bin/bitcoin-core-29.4/>
 
 This release includes various bug fixes and performance
 improvements, as well as updated translations.
@@ -37,68 +37,70 @@ unsupported systems.
 Notable changes
 ===============
 
-### P2P
-
-- #33050 net, validation: don't punish peers for consensus-invalid txs
-- #33723 chainparams: remove dnsseed.bitcoin.dashjr-list-of-p2p-nodes.us
+This release fixes an issue where the chainstate database would repeatedly
+rewrite large portions of itself, causing excessive disk reads and writes
+during normal operation.
 
 ### Validation
 
-- #32473 Introduce per-txin sighash midstate cache for legacy/p2sh/segwitv0 scripts
-- #33105 validation: detect witness stripping without re-running Script checks
+- #35209 validation: correct lifetime of precomputed tx data
+- #35465 coins: compact chainstate regularly
+
+### Leveldb
+
+- #61(bitcoin-core/leveldb): Disable seek compaction
+
+### Net
+
+- #34093 netif: fix compilation warning in QueryDefaultGatewayImpl()
 
 ### Wallet
 
-- #33268 wallet: Identify transactions spending 0-value outputs, and add tests for anchor outputs in a wallet
-- #34156 wallet: fix unnamed legacy wallet migration failure
-- #34226 wallet: test: Relative wallet failed migration cleanup
-- #34123 wallet: migration, avoid creating spendable wallet from a watch-only legacy wallet
-- #34215 wallettool: fix unnamed createfromdump failure walletsdir deletion
-- #34370 wallet: Additional cleanups for migration, and fixes for createfromdump with BDB
-
-### Mining
-
-- #33475 bugfix: miner: fix `addPackageTxs` unsigned integer overflow
+- #35228 wallet: use outpoint when estimating input size
 
 ### Build
 
-- #34227 guix: Fix `osslsigncode` tests
-
-### Documentation
-
-- #33623 doc: document capnproto and libmultiprocess deps in 29.x
+- #34228 depends: Unset SOURCE_DATE_EPOCH in gen_id script
+- #34848 cmake: Migrate away from deprecated SQLite3 target
 
 ### Test
 
-- #33612 test: change log rate limit version gate
+- #34918 fuzz: [refactor] Remove unused g_setup pointers
+
+### Doc
+
+- #34510 doc: fix broken bpftrace installation link
+- #34561 wallet: rpc: manpage: fix example missing `fee_rate` argument
+- #34671 doc: Update Guix install for Debian/Ubuntu
+- #35283 doc: mention -DWITH_ZMQ=ON in BSD build guides
+
+### CI
+
+- #35202 ci: restore sockets in i686, no IPC job
+- #35378 ci: switch runners from cirrus to warpbuild
+- #35408 ci: 35378 followups
 
 ### Misc
 
-- #32513 ci: remove 3rd party js from windows dll gha job
-- #33508 ci: fix buildx gha cache authentication on forks
-- #33581 ci: Properly include $FILE_ENV in DEPENDS_HASH
-- #34344 ci: update GitHub Actions versions
+- #35175 multi_index: fix compilation failure with boost >= 1.91
 
 Credits
 =======
 
 Thanks to everyone who directly contributed to this release:
 
-- Anthony Towns
-- Antoine Poinsot
-- Ava Chow
-- David Gumberg
-- Eugene Siegel
+- andrewtoth
+- Cory Fields
+- Daniel Pfeifer
+- darosior
 - fanquake
-- furszy
 - Hennadii Stepanov
-- ismaelsadeeq
-- luke-jr
-- m3dwards
-- Padraic Slattery
-- Pieter Wuille
-- SatsAndSports
-- sedited
+- jayvaliya
+- junbyjun1238
+- Lőrinc
+- MarcoFalke
+- SomberNight
+- ToRyVand
 - willcl-ark
 
 As well as to everyone that helped with translations on

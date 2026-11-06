@@ -340,7 +340,7 @@ class ConfArgsTest(BitcoinTestFramework):
                 "Loaded 0 addresses from peers.dat",
                 "DNS seeding disabled",
                 "Fixed seeds are disabled",
-        ]):
+        ], timeout=2):
             self.start_node(0, extra_args=['-dnsseed=0', '-fixedseeds=0'])
         self.stop_node(0)
 
@@ -384,7 +384,7 @@ class ConfArgsTest(BitcoinTestFramework):
         # If the user did not disable -dnsseed, but it was soft-disabled because they provided -connect,
         # they shouldn't see a warning about -dnsseed being ignored.
         with self.nodes[0].assert_debug_log(expected_msgs=addcon_thread_started,
-                unexpected_msgs=dnsseed_ignored):
+                unexpected_msgs=dnsseed_ignored, timeout=2):
             self.restart_node(0, extra_args=['-connect=fakeaddress1', UNREACHABLE_PROXY_ARG])
 
         # We have to supply expected_msgs as it's a required argument
@@ -392,7 +392,7 @@ class ConfArgsTest(BitcoinTestFramework):
         # These cases test for -connect being supplied but only to disable it
         for connect_arg in ['-connect=0', '-noconnect']:
             with self.nodes[0].assert_debug_log(expected_msgs=addcon_thread_started,
-                    unexpected_msgs=seednode_ignored):
+                    unexpected_msgs=seednode_ignored, timeout=2):
                 self.restart_node(0, extra_args=[connect_arg, '-seednode=fakeaddress2'])
 
             # Make sure -noconnect soft-disables -listen and -dnsseed.
@@ -408,6 +408,12 @@ class ConfArgsTest(BitcoinTestFramework):
             with self.nodes[0].assert_debug_log(expected_msgs=dnsseed_ignored):
                 self.restart_node(0, extra_args=[connect_arg, '-dnsseed', '-proxy=localhost:1080'])
         self.stop_node(0)
+
+    def test_v2onlyclearnet(self):
+        self.log.info('Test -v2onlyclearnet startup options')
+        self.nodes[0].assert_start_raises_init_error(
+            extra_args=['-v2onlyclearnet=1', '-v2transport=0'],
+            expected_msg='Error: Cannot set -v2onlyclearnet to true when v2transport is disabled.')
 
     def test_ignored_conf(self):
         self.log.info('Test error is triggered when the datadir in use contains a bitcoin.conf file that would be ignored '
@@ -494,6 +500,7 @@ class ConfArgsTest(BitcoinTestFramework):
         self.test_seed_peers()
         self.test_networkactive()
         self.test_connect_with_seednode()
+        self.test_v2onlyclearnet()
 
         self.test_dir_config()
         self.test_negated_config()

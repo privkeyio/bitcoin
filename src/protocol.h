@@ -347,6 +347,9 @@ enum ServiceFlags : uint64_t {
 
     NODE_REPLACE_BY_FEE = (1 << 26),
 
+    // NODE_REDUCED_DATA means the node enforces ReducedData rules as applicable
+    NODE_REDUCED_DATA = (1 << 27),
+
     NODE_MALICIOUS = (1 << 29),
 };
 
@@ -364,6 +367,14 @@ std::vector<std::string> serviceFlagsToStr(uint64_t flags);
  * desired service flags (compatible with our new flags).
  */
 constexpr ServiceFlags SeedsServiceFlags() { return ServiceFlags(NODE_NETWORK | NODE_WITNESS | NODE_REDUCED_DATA); }
+
+/**
+ * Service flags we assume for addresses obtained from the DNS seeds and the
+ * fixed seeds, which don't come with service flags attached.
+ * BIP324 support can be safely assumed because the vast majority of listening nodes signals NODE_P2P_V2, and if the
+ * assumption is wrong for a given peer we simply reconnect using v1 transport.
+ */
+constexpr ServiceFlags SeedsAssumedServiceFlags() { return ServiceFlags(SeedsServiceFlags() | NODE_P2P_V2); }
 
 /**
  * Checks if a peer with the given service flags may be capable of having a

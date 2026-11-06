@@ -509,7 +509,7 @@ static RPCHelpMan getblockfrompeer()
         "Returns an empty JSON object if the request was successfully scheduled.",
         {
             {"blockhash", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "The block hash to try to fetch"},
-            {"peer_id", RPCArg::Type::NUM, RPCArg::Optional::NO, "The peer to fetch it from (see getpeerinfo for peer IDs)"},
+            {"peer_id|nodeid", RPCArg::Type::NUM, RPCArg::Optional::NO, "The peer to fetch it from (see getpeerinfo for peer IDs)"},
         },
         RPCResult{RPCResult::Type::OBJ, "", /*optional=*/false, "", {}},
         RPCExamples{
@@ -615,7 +615,7 @@ static RPCHelpMan sweepprivkeys()
     // Parse options
     std::set<CScript> needles;
     wallet::CCoinControl coin_control;
-    FillableSigningProvider temp_keystore;
+    FlatSigningProvider temp_keystore;
     CMutableTransaction tx;
     std::string label;
     CAmount total_in = 0;
@@ -631,7 +631,8 @@ static RPCHelpMan sweepprivkeys()
                 CPubKey pubkey = key.GetPubKey();
                 CHECK_NONFATAL(key.VerifyPubKey(pubkey));
 
-                temp_keystore.AddKey(key);
+                temp_keystore.keys[pubkey.GetID()] = key;
+                temp_keystore.pubkeys[pubkey.GetID()] = pubkey;
                 CKeyID address = pubkey.GetID();
                 CScript script = GetScriptForDestination(PKHash(address));
                 if (!script.empty()) {
@@ -640,6 +641,25 @@ static RPCHelpMan sweepprivkeys()
                 script = GetScriptForRawPubKey(pubkey);
                 if (!script.empty()) {
                     needles.insert(script);
+                }
+                if (pubkey.IsCompressed()) {
+                    CScript p2wpkh_script = GetScriptForDestination(WitnessV0KeyHash(pubkey));
+                    if (!p2wpkh_script.empty()) {
+                        needles.insert(p2wpkh_script);
+                    }
+                    script = GetScriptForDestination(ScriptHash(p2wpkh_script));
+                    if (!script.empty()) {
+                        needles.insert(script);
+                        temp_keystore.scripts[CScriptID(p2wpkh_script)] = p2wpkh_script;
+                    }
+                    auto tap_tweak = XOnlyPubKey(pubkey).CreateTapTweak(nullptr);
+                    if (tap_tweak) {
+                        WitnessV1Taproot output_key{tap_tweak->first};
+                        needles.insert(GetScriptForDestination(output_key));
+                        TaprootBuilder builder;
+                        builder.Finalize(XOnlyPubKey(pubkey));
+                        temp_keystore.tr_trees[output_key] = builder;
+                    }
                 }
             }
         } else if (optname == "label") {
@@ -710,10 +730,12 @@ static RPCHelpMan sweepprivkeys()
         if (IsDust(tx.vout[0], pwallet->chain().relayDustFee())) {
             throw JSONRPCError(RPC_VERIFY_REJECTED, "Swept value would be dust");
         }
+        PrecomputedTransactionData txdata;
+        txdata.Init(tx, std::vector<CTxOut>(input_txos.begin(), input_txos.end()), true);
         for (size_t input_index = 0; input_index < tx.vin.size(); ++input_index) {
             const auto& utxo = input_txos[input_index];
             SignatureData sig_data;
-            MutableTransactionSignatureCreator creator(tx, input_index, utxo.nValue, SIGHASH_ALL);
+            MutableTransactionSignatureCreator creator(tx, input_index, utxo.nValue, &txdata, SIGHASH_ALL);
             if (!ProduceSignature(temp_keystore, creator, utxo.scriptPubKey, sig_data)) {
                 throw JSONRPCError(RPC_MISC_ERROR, "Failed to sign");
             }
@@ -886,7 +908,9 @@ static CBlockUndo GetUndoChecked(BlockManager& blockman, const CBlockIndex& bloc
     return blockUndo;
 }
 
-const RPCResult getblock_vin{
+const RPCResult& GetBlockVin()
+{
+    static const RPCResult getblock_vin{
     RPCResult::Type::ARR, "vin", "",
     {
         {RPCResult::Type::OBJ, "", "",
@@ -909,6 +933,8 @@ const RPCResult getblock_vin{
         }},
     }
 };
+    return getblock_vin;
+}
 
 static RPCHelpMan getblock()
 {
@@ -959,7 +985,7 @@ static RPCHelpMan getblock()
                         {RPCResult::Type::OBJ, "", "",
                         {
                             {RPCResult::Type::ELISION, "", "The transactions in the format of the getrawtransaction RPC. Different from verbosity = 1 \"tx\" result"},
-                            {RPCResult::Type::NUM, "fee", "The transaction fee in " + CURRENCY_UNIT + ", omitted if block undo data is not available"},
+                            {RPCResult::Type::NUM, "fee", /*optional=*/true, "The transaction fee in " + CURRENCY_UNIT + ", omitted if block undo data is not available"},
                         }},
                     }},
                 }},
@@ -971,7 +997,7 @@ static RPCHelpMan getblock()
                     {
                         {RPCResult::Type::OBJ, "", "",
                         {
-                            getblock_vin,
+                            GetBlockVin(),
                         }},
                     }},
                 }},
@@ -3471,21 +3497,22 @@ static RPCHelpMan dumptxoutset()
         "This call may take several minutes. Make sure to use no RPC timeout (bitcoin-cli -rpcclienttimeout=0)",
         {
             {"path", RPCArg::Type::STR, RPCArg::Optional::NO, "Path to the output file. If relative, will be prefixed by datadir."},
-            {"type", RPCArg::Type::STR, RPCArg::Default(""), "The type of snapshot to create. Can be \"latest\" to create a snapshot of the current UTXO set or \"rollback\" to temporarily roll back the state of the node to a historical block before creating the snapshot of a historical UTXO set. This parameter can be omitted if a separate \"rollback\" named parameter is specified indicating the height or hash of a specific historical block. If \"rollback\" is specified and separate \"rollback\" named parameter is not specified, this will roll back to the latest valid snapshot block that can currently be loaded with loadtxoutset."},
-            {"options", RPCArg::Type::OBJ_NAMED_PARAMS, RPCArg::Optional::OMITTED, "",
+            {"type|format", {RPCArg::Type::STR, RPCArg::Type::ARR}, RPCArg::Default(""), "The type of snapshot to create. Can be \"latest\" to create a snapshot of the current UTXO set or \"rollback\" to temporarily roll back the state of the node to a historical block before creating the snapshot of a historical UTXO set. This parameter can be omitted if a separate \"rollback\" named parameter is specified indicating the height or hash of a specific historical block. If \"rollback\" is specified and separate \"rollback\" named parameter is not specified, this will roll back to the latest valid snapshot block that can currently be loaded with loadtxoutset."},
+            {"options|show_header", {RPCArg::Type::OBJ_NAMED_PARAMS, RPCArg::Type::BOOL}, RPCArg::Optional::OMITTED, "",
                 {
                     {"format", RPCArg::Type::ARR, RPCArg::DefaultHint{"compact serialized format"},
                                                 "If no argument is provided, a compact binary serialized format is used; otherwise only requested items "
                                                 "available below are written in ASCII format (if an empty array is provided, all items are written in ASCII).",
                                                 ascii_args,
-                                                RPCArgOptions{.oneline_description="format"}},
+                                                RPCArgOptions{.oneline_description="format", .also_positional = true}},
                     {"rollback", RPCArg::Type::NUM, RPCArg::Optional::OMITTED,
                         "Height or hash of the block to roll back to before creating the snapshot. Note: The further this number is from the tip, the longer this process will take. Consider setting a higher -rpcclienttimeout value in this case.",
                     RPCArgOptions{.skip_type_check = true, .type_str = {"", "string or numeric"}}},
-                    {"show_header", RPCArg::Type::BOOL, RPCArg::Default{true}, "Whether to include the header line in non-serialized (ASCII) mode"},
-                    {"separator", RPCArg::Type::STR, RPCArg::Default{","}, "Field separator to use in non-serialized (ASCII) mode"},
+                    {"show_header", RPCArg::Type::BOOL, RPCArg::Default{true}, "Whether to include the header line in non-serialized (ASCII) mode", RPCArgOptions{.also_positional = true}},
+                    {"separator", RPCArg::Type::STR, RPCArg::Default{","}, "Field separator to use in non-serialized (ASCII) mode", RPCArgOptions{.also_positional = true}},
                 },
             },
+            {"separator", RPCArg::Type::STR, RPCArg::Optional::OMITTED, "", RPCArgOptions{.hidden=true}},
         },
         RPCResult{
             RPCResult::Type::OBJ, "", "",
@@ -3513,8 +3540,44 @@ static RPCHelpMan dumptxoutset()
     NodeContext& node = EnsureAnyNodeContext(request.context);
     const CBlockIndex* tip{WITH_LOCK(::cs_main, return node.chainman->ActiveChain().Tip())};
     const CBlockIndex* target_index{nullptr};
-    const std::string snapshot_type{self.Arg<std::string>("type")};
-    const UniValue options{request.params[2].isNull() ? UniValue::VOBJ : request.params[2]};
+    std::string snapshot_type;
+    UniValue options{request.params[2].isObject() ? request.params[2] : UniValue::VOBJ};
+
+    const UniValue& hr_format = [&]() -> const UniValue& {
+        if (options["format"].isNull() && request.params[1].isArray()) {
+            // Knots 0.20.0-28.1 compatibility
+            snapshot_type = "latest";
+            return request.params[1];
+        }
+        snapshot_type = self.Arg<std::string>("type");
+        return options["format"];
+    }();
+    const bool is_human_readable = !hr_format.isNull();
+    const bool show_header = [&] {
+        if (!options["show_header"].isNull()) {  // only possible of options is an Object
+            return options["show_header"].get_bool();
+        }
+        if (is_human_readable && request.params[2].isBool()) {
+            // Knots 0.20.0-28.1 compatibility
+            return request.params[2].get_bool();
+        }
+        if (!request.params[2].isNull()) request.params[2].get_obj();  // type check skipped earlier
+        return true;
+    }();
+    const auto separator = [&] {
+        const bool null_separator_in_options{options["separator"].isNull()};
+        if (null_separator_in_options && is_human_readable && request.params[3].isStr()) {
+            return MakeByteSpan(request.params[3].get_str());
+        }
+        if (!request.params[3].isNull()) {
+            throw std::runtime_error(self.ToString());
+        }
+        if (null_separator_in_options) {
+            return MakeByteSpan(",").first(1);
+        }
+        return MakeByteSpan(options["separator"].get_str());
+    }();
+
     if (options.exists("rollback")) {
         if (!snapshot_type.empty() && snapshot_type != "rollback") {
             throw JSONRPCError(RPC_INVALID_PARAMETER, strprintf("Invalid snapshot type \"%s\" specified with rollback option", snapshot_type));
@@ -3532,12 +3595,9 @@ static RPCHelpMan dumptxoutset()
     }
 
     // handle optional ASCII parameters
-    const bool is_human_readable = !options["format"].isNull();
-    const bool show_header = options["show_header"].isNull() || options["show_header"].get_bool();
-    const auto separator = options["separator"].isNull() ? MakeByteSpan(",").first(1) : MakeByteSpan(options["separator"].get_str());
     std::vector<std::pair<std::string, coinascii_cb_t>> requested;
     if (is_human_readable) {
-        const auto& arr = options["format"].get_array();
+        const auto& arr = hr_format.get_array();
         const std::unordered_map<std::string, coinascii_cb_t> ascii_map(std::begin(ascii_types), std::end(ascii_types));
         for (size_t i = 0; i < arr.size(); ++i) {
             const auto it = ascii_map.find(arr[i].get_str());
